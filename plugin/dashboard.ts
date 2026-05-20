@@ -664,9 +664,24 @@ function startPair(projectId: string): { ok: boolean; err?: string } {
             broadcast('qr', code)
             renderAndBroadcastQr(code)
           }
-        } else if (name === 'login_success' || name === 'paired' || name === 'logged_in' || name === 'auth_complete' || name === 'authenticated' || name === 'pair_success') {
-          sess.status = 'paired'
-          broadcast('status', 'paired')
+        } else if (name === 'connected' || name === 'login_success' || name === 'paired' || name === 'logged_in' || name === 'auth_complete' || name === 'authenticated' || name === 'pair_success') {
+          // 'connected' fires FIRST when WhatsApp accepts the QR scan, before
+          // history_sync starts. That's the moment to tell the user "linked!"
+          // — waiting for the whole process to exit can take 30s+ on big accounts.
+          if (sess.status !== 'paired') {
+            sess.status = 'paired'
+            broadcast('status', 'paired')
+            // Auto-start router so the bot is alive without an extra user click.
+            // Kick off async; toast appears in browser via subsequent /projects refresh.
+            setTimeout(() => {
+              try {
+                const r = startRouter(projectId)
+                process.stderr.write(`[pair:${sess.account}] auto-start router → ${JSON.stringify(r)}\n`)
+              } catch (err) {
+                process.stderr.write(`[pair:${sess.account}] auto-start router failed: ${err}\n`)
+              }
+            }, 1500)   // give wacli a beat to release its lock from auth process
+          }
         } else if (name === 'error' || name === 'pair_error' || name === 'auth_failed') {
           sess.status = 'error'
           sess.errorMsg = msg ?? code ?? 'unknown'
@@ -683,7 +698,6 @@ function startPair(projectId: string): { ok: boolean; err?: string } {
 
   child.on('exit', code => {
     if (sess.status !== 'paired' && sess.status !== 'error') {
-      // If process exited cleanly we consider it paired; non-zero treated as error
       if (code === 0) {
         sess.status = 'paired'
         broadcast('status', 'paired')
@@ -694,7 +708,11 @@ function startPair(projectId: string): { ok: boolean; err?: string } {
       }
     }
     broadcast('close', String(code))
-    pairSessions.delete(projectId)
+    // Keep the session around briefly so late SSE reconnects can replay
+    // the final state instead of seeing 404 (which makes EventSource
+    // auto-reconnect in a tight loop). 30s is plenty for the browser to
+    // notice paired and close the connection cleanly.
+    setTimeout(() => { pairSessions.delete(projectId) }, 30_000)
   })
   child.on('error', err => {
     sess.status = 'error'
@@ -861,7 +879,13 @@ const server = (globalThis as any).Bun.serve({
       }
       if (sub === '/pair/stream' && req.method === 'GET') {
         const sess = pairSessions.get(id)
-        if (!sess) return new Response('no active pair session', { status: 404 })
+        // 410 Gone (not 404) signals to EventSource: don't auto-reconnect.
+        // The browser also calls es.close() on paired — this is belt-and-suspenders
+        // for clients that miss the explicit close.
+        if (!sess) return new Response('pair session not active (already done or never started)', {
+          status: 410,
+          headers: { 'Content-Type': 'text/plain' },
+        })
 
         let queue: string[] = []
         let pushFn: ((s: string) => void) | null = null

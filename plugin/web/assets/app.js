@@ -681,7 +681,13 @@ function app() {
         const d = e.data
         if (d === 'paired') {
           this.wizard.pairStatus = 'paired'
+          // Close SSE NOW so it doesn't auto-reconnect into a 410 loop.
+          try { es.close() } catch {}
+          this.wizard.eventSource = null
           this.refresh()
+          // Backend auto-starts router ~1.5s after this; refresh again to pick up routerAlive.
+          setTimeout(() => this.refresh(), 3000)
+          this.flashToast('✓ WhatsApp linked! Router starting…')
         } else if (d.startsWith('error:')) {
           this.wizard.pairStatus = 'error'
           this.wizard.pairError = d.slice(6)
@@ -690,7 +696,15 @@ function app() {
         }
       })
       es.addEventListener('log', (e) => { console.debug('[pair log]', e.data) })
-      es.onerror = (err) => { console.warn('SSE error (will reconnect)', err) }
+      es.onerror = (err) => {
+        // EventSource auto-reconnects by default. We only want it to retry while
+        // pairing is active. Once paired/error/timeout, the status handler closes it.
+        if (this.wizard.pairStatus === 'paired' || this.wizard.pairStatus === 'error' || this.wizard.pairStatus === 'timeout') {
+          try { es.close() } catch {}
+        } else {
+          console.debug('SSE transient error (will auto-reconnect):', err)
+        }
+      }
     },
     async wizardRetryPair() {
       if (this.wizard.eventSource) { try { this.wizard.eventSource.close() } catch {} }
@@ -721,13 +735,24 @@ function app() {
         const d = e.data
         if (d === 'paired') {
           this.pairModal.status = 'paired'
+          try { es.close() } catch {}
+          this.pairModal.eventSource = null
           this.refresh()
+          setTimeout(() => this.refresh(), 3000)
+          this.flashToast('✓ WhatsApp linked! Router starting…')
         } else if (d.startsWith('error:')) {
           this.pairModal.status = 'error'
           this.pairModal.error = d.slice(6)
         }
       })
       es.addEventListener('log', (e) => { console.debug('[pair log]', e.data) })
+      es.onerror = (err) => {
+        if (this.pairModal.status === 'paired' || this.pairModal.status === 'error') {
+          try { es.close() } catch {}
+        } else {
+          console.debug('SSE transient error (will auto-reconnect):', err)
+        }
+      }
     },
     closePair() {
       if (this.pairModal.eventSource) { try { this.pairModal.eventSource.close() } catch {} }
