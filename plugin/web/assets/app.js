@@ -141,8 +141,8 @@ function app() {
     ],
 
     // ─── access ───
-    accessSaved: { allowFrom: [], disabled: false },
-    accessDraft: { allowFrom: [], disabled: false },
+    accessSaved: { allowFrom: [], disabled: false, mode: 'open' },
+    accessDraft: { allowFrom: [], disabled: false, mode: 'open' },
     accessIsDirty: false,
     newJid: '',
 
@@ -365,7 +365,11 @@ function app() {
       if (!this.selectedId) return
       const r = await fetch(`/api/projects/${this.selectedId}/access`)
       const data = await r.json()
-      this.accessSaved = { allowFrom: data.allowFrom ?? [], disabled: !!data.disabled }
+      this.accessSaved = {
+        allowFrom: data.allowFrom ?? [],
+        disabled: !!data.disabled,
+        mode: (data.mode === 'closed' ? 'closed' : 'open'),
+      }
       this.accessDraft = JSON.parse(JSON.stringify(this.accessSaved))
       this.accessIsDirty = false
     },

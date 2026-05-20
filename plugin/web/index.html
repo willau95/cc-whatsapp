@@ -449,21 +449,46 @@
         <div class="mb-6">
           <h2 class="text-xl font-bold mb-1">Who can message the bot</h2>
           <p class="text-sm text-zinc-400">
-            Inbound messages from JIDs NOT in this list are dropped silently (you'll see them in the trace as <code>drop_not_allowlisted</code>). Re-read on every inbound — changes take effect immediately.
+            Pick how the bot decides to engage. Re-read on every inbound — changes take effect immediately.
           </p>
+        </div>
+
+        <!-- Mode picker -->
+        <div class="grid grid-cols-2 gap-3 mb-6">
+          <label :class="accessDraft.mode === 'open' ? 'border-emerald-500 bg-emerald-900/20' : 'border-zinc-700 hover:bg-zinc-800'"
+                 class="border rounded-xl p-4 cursor-pointer">
+            <input type="radio" value="open" x-model="accessDraft.mode" @change="markAccessDirty()" class="sr-only">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="text-2xl">🌍</span>
+              <span class="font-bold">Open</span>
+              <span x-show="accessDraft.mode === 'open'" class="ml-auto text-emerald-400">✓</span>
+            </div>
+            <div class="text-xs text-zinc-400">Anyone who messages the bot gets auto-onboarded — added to the contacts list and a memory file created from the template.</div>
+          </label>
+          <label :class="accessDraft.mode === 'closed' ? 'border-amber-500 bg-amber-900/20' : 'border-zinc-700 hover:bg-zinc-800'"
+                 class="border rounded-xl p-4 cursor-pointer">
+            <input type="radio" value="closed" x-model="accessDraft.mode" @change="markAccessDirty()" class="sr-only">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="text-2xl">🔒</span>
+              <span class="font-bold">Closed</span>
+              <span x-show="accessDraft.mode === 'closed'" class="ml-auto text-amber-400">✓</span>
+            </div>
+            <div class="text-xs text-zinc-400">Only JIDs in the allowlist below can message. Everyone else is dropped silently as <code>drop_not_allowlisted</code>.</div>
+          </label>
         </div>
 
         <label class="flex items-center gap-3 mb-6 p-4 bg-zinc-900 border border-zinc-800 rounded-xl cursor-pointer">
           <input type="checkbox" x-model="accessDraft.disabled" @change="markAccessDirty()" class="w-4 h-4">
           <div>
-            <div class="text-sm font-medium">Kill switch — bot disabled</div>
-            <div class="text-xs text-zinc-500">Drops ALL inbound regardless of allowlist. Useful for quick mute.</div>
+            <div class="text-sm font-medium">Kill switch — bot fully disabled</div>
+            <div class="text-xs text-zinc-500">Drops ALL inbound regardless of mode. Overrides everything.</div>
           </div>
         </label>
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden mb-4">
-          <div class="px-4 py-2 bg-zinc-950 text-xs text-zinc-500 uppercase tracking-wider">
-            Allowlist · <span x-text="accessDraft.allowFrom?.length || 0"></span> JID(s)
+          <div class="px-4 py-2 bg-zinc-950 text-xs text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+            <span x-show="accessDraft.mode === 'open'">Contacts who've messaged so far · <span x-text="accessDraft.allowFrom?.length || 0"></span></span>
+            <span x-show="accessDraft.mode === 'closed'">Allowlist · <span x-text="accessDraft.allowFrom?.length || 0"></span> JID(s)</span>
           </div>
           <template x-for="(jid, idx) in accessDraft.allowFrom" :key="idx">
             <div class="flex items-center gap-3 px-4 py-2 border-t border-zinc-800">
@@ -472,17 +497,18 @@
             </div>
           </template>
           <div x-show="!accessDraft.allowFrom?.length" class="px-4 py-8 text-center text-zinc-500 text-sm">
-            Nobody allowed yet. The bot ignores everything until you add a JID below.
+            <span x-show="accessDraft.mode === 'open'">No one has messaged yet. First message will auto-create a contact entry.</span>
+            <span x-show="accessDraft.mode === 'closed'">Nobody allowed yet. Add a JID below.</span>
           </div>
         </div>
 
-        <form @submit.prevent="addAllowedJid()" class="flex gap-2">
+        <form @submit.prevent="addAllowedJid()" class="flex gap-2" x-show="accessDraft.mode === 'closed'">
           <input x-model="newJid" placeholder="1234567890@s.whatsapp.net  OR  123456789@lid"
                  class="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-700 rounded text-sm font-mono focus:border-brand-500 outline-none">
           <button class="px-4 py-2 rounded bg-brand-600 hover:bg-brand-500 text-white text-sm">+ Add</button>
         </form>
-        <p class="text-xs text-zinc-500 mt-3">
-          Don't know a JID? Have the person message your bot — their JID will show up in <em>trace</em> as <code class="text-zinc-400">drop_not_allowlisted</code>.
+        <p x-show="accessDraft.mode === 'open'" class="text-xs text-zinc-500 mt-3">
+          To block someone: switch to Closed mode + remove them from the list above. (Or use Kill switch for a global mute.)
         </p>
       </section>
 

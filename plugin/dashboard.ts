@@ -455,7 +455,9 @@ function createProject(opts: { parentDir: string; name: string; account: string;
   mkdirSync(contactsDir, { recursive: true, mode: 0o700 })
 
   writeJsonAtomic(join(stateDir, 'config.json'), { account })
-  writeJsonAtomic(join(stateDir, 'access.json'), { allowFrom: [] })
+  // mode:'open' = anyone can message + bot auto-onboards them (default).
+  // To restrict, switch to mode:'closed' from Access tab.
+  writeJsonAtomic(join(stateDir, 'access.json'), { allowFrom: [], mode: 'open' })
   writeJsonAtomic(join(stateDir, 'sessions.json'), {})
   writeJsonAtomic(join(stateDir, 'tunables.json'), {})
 
@@ -994,13 +996,19 @@ const server = (globalThis as any).Bun.serve({
 
       // ACCESS
       if (sub === '/access' && req.method === 'GET') {
-        return json(readJsonSafe(join(stateDir, 'access.json')) ?? { allowFrom: [] })
+        const raw = readJsonSafe(join(stateDir, 'access.json')) ?? { allowFrom: [] }
+        return json({
+          allowFrom: raw.allowFrom ?? [],
+          disabled: !!raw.disabled,
+          mode: (raw.mode === 'closed' ? 'closed' : 'open'),   // default open
+        })
       }
       if (sub === '/access' && req.method === 'PUT') {
-        const body = await req.json() as { allowFrom?: string[]; disabled?: boolean }
+        const body = await req.json() as { allowFrom?: string[]; disabled?: boolean; mode?: string }
         const next = {
           allowFrom: Array.from(new Set(body.allowFrom ?? [])).filter(Boolean),
           disabled: !!body.disabled,
+          mode: (body.mode === 'closed' ? 'closed' : 'open'),
         }
         writeJsonAtomic(join(stateDir, 'access.json'), next)
         return json({ ok: true, access: next })

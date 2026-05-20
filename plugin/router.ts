@@ -153,12 +153,53 @@ function getOrCreateSecret(): string {
   return s
 }
 
-type Access = { allowFrom: string[]; disabled?: boolean }
-function loadAccess(): Access {
+type AccessMode = 'open' | 'closed'
+type Access = { allowFrom: string[]; disabled?: boolean; mode?: AccessMode }
+function loadAccess(): Required<Access> {
   try {
     const p = JSON.parse(readFileSync(ACCESS_FILE, 'utf8')) as Partial<Access>
-    return { allowFrom: p.allowFrom ?? [], disabled: p.disabled }
-  } catch { return { allowFrom: [] } }
+    return {
+      allowFrom: p.allowFrom ?? [],
+      disabled: !!p.disabled,
+      mode: (p.mode === 'closed' ? 'closed' : 'open') as AccessMode,  // default open
+    }
+  } catch { return { allowFrom: [], disabled: false, mode: 'open' } }
+}
+
+// Atomically add a new sender to allowFrom + create a contact memory file
+// from TEMPLATE.md (substituting JID + PushName + date). Idempotent.
+function autoOnboardSender(jid: string, pushName?: string): void {
+  // 1. add to allowFrom
+  try {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(jid)) {
+      access.allowFrom.push(jid)
+      const tmp = ACCESS_FILE + '.tmp'
+      writeFileSync(tmp, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 })
+      renameSync(tmp, ACCESS_FILE)
+    }
+  } catch (err) { trace('auto_onboard_allowlist_err', String(err)) }
+
+  // 2. create contacts/<jid>.md from TEMPLATE.md (skip if file exists)
+  try {
+    const contactPath = join(CONTACTS_DIR, `${jid}.md`)
+    if (existsSync(contactPath)) return
+    const tplPath = join(CONTACTS_DIR, 'TEMPLATE.md')
+    const today = new Date().toISOString().slice(0, 10)
+    let content: string
+    if (existsSync(tplPath)) {
+      content = readFileSync(tplPath, 'utf8')
+        .replace(/<JID>/g, jid)
+        .replace(/YYYY-MM-DD/g, today)
+      // Prepend an auto-created banner so the bot knows what is template-text vs filled-in
+      content = `<!-- auto-created ${new Date().toISOString()} from first inbound message (PushName: ${pushName ?? '?'}) — replace the placeholder fields below as you learn -->\n\n` + content
+    } else {
+      content = `# ${jid}\n\n- WhatsApp PushName: ${pushName ?? '?'}\n- First contact: ${today}\n\n## Background\n*(fill in as you learn)*\n\n## Notes\n*(append observations + things to remember)*\n`
+    }
+    mkdirSync(CONTACTS_DIR, { recursive: true, mode: 0o700 })
+    writeFileSync(contactPath, content, { mode: 0o600 })
+    trace('contact_auto_created', { jid, pushName, path: contactPath })
+  } catch (err) { trace('auto_onboard_contact_err', String(err)) }
 }
 
 type Sessions = Record<string, string>  // jid → claude session UUID
@@ -659,13 +700,20 @@ const server = (globalThis as any).Bun.serve({
 
       const access = loadAccess()
       if (access.disabled) { trace('drop_disabled'); return new Response('ok') }
-      if (!access.allowFrom.includes(evt.Chat)) {
-        trace('drop_not_allowlisted', { jid: evt.Chat })
-        return new Response('ok')
-      }
       if (evt.FromMe === true || evt.Revoked === true) {
         trace('drop_from_me_or_revoked', { jid: evt.Chat })
         return new Response('ok')
+      }
+      // open mode (default) = auto-accept anyone + create contact memory
+      // closed mode = strict allowlist (original behavior)
+      if (!access.allowFrom.includes(evt.Chat)) {
+        if (access.mode === 'closed') {
+          trace('drop_not_allowlisted', { jid: evt.Chat })
+          return new Response('ok')
+        }
+        // mode === 'open' → auto-onboard
+        autoOnboardSender(evt.Chat, evt.PushName)
+        trace('auto_onboarded', { jid: evt.Chat, pushName: evt.PushName })
       }
 
       // Hand off to the batching state machine. It will collect more msgs,
