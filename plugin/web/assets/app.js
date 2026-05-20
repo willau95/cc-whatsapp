@@ -166,6 +166,21 @@ function app() {
     // ─── contact memory editor (drawer) ───
     contactEditor: { open: false, jid: '', saved: '', draft: '' },
 
+    // ─── owner JID config ───
+    ownerJidSaved: '',
+    ownerJidDraft: '',
+    ownerJidInfo: '',
+
+    // ─── link-existing-project modal ───
+    linkExisting: {
+      open: false, step: 1, busy: false, error: null,
+      projectDir: '', account: '', ownerJid: '', template: 'eva',
+      newProjectId: null,
+      warnings: [],
+      pairStatus: 'idle', pairError: '', qrDataUrl: '',
+      eventSource: null,
+    },
+
     // ─── wizard ───
     wizard: {
       open: false, step: 1, busy: false, error: null,
@@ -218,6 +233,118 @@ function app() {
       }
     },
 
+    // ─── owner JID ───
+    async loadOwnerJid() {
+      if (!this.selectedId) { this.ownerJidSaved = ''; this.ownerJidDraft = ''; return }
+      try {
+        const r = await fetch(`/api/projects/${this.selectedId}/owner-jid`)
+        const d = await r.json()
+        this.ownerJidSaved = d.ownerJid ?? ''
+        this.ownerJidDraft = this.ownerJidSaved
+      } catch {
+        this.ownerJidSaved = ''
+        this.ownerJidDraft = ''
+      }
+    },
+    async saveOwnerJid() {
+      const v = (this.ownerJidDraft || '').trim()
+      const r = await fetch(`/api/projects/${this.selectedId}/owner-jid`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ownerJid: v || null }),
+      })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Save failed: ' + (d.err ?? 'unknown'), 'error'); return }
+      this.ownerJidSaved = d.ownerJid ?? ''
+      this.ownerJidDraft = this.ownerJidSaved
+      this.ownerJidInfo = d.sessionUuid
+        ? `✓ saved · session UUID: ${d.sessionUuid.slice(0,8)}…  (linked to existing terminal session at ~/.claude/projects/<cwd-hash>/${d.sessionUuid}.jsonl)`
+        : (v ? `✓ saved · no existing terminal session found for this cwd — WA messages will spawn a fresh UUID. Run "claude" in the project once if you want to share with terminal.` : '✓ cleared')
+      this.flashToast('Owner JID saved')
+    },
+
+    // ─── link existing project ───
+    openLinkExisting() {
+      this.linkExisting = {
+        open: true, step: 1, busy: false, error: null,
+        projectDir: '', account: '', ownerJid: '', template: 'eva',
+        newProjectId: null, warnings: [],
+        pairStatus: 'idle', pairError: '', qrDataUrl: '',
+        eventSource: null,
+      }
+    },
+    closeLinkExisting() {
+      if (this.linkExisting.eventSource) { try { this.linkExisting.eventSource.close() } catch {} }
+      if (this.linkExisting.newProjectId && (this.linkExisting.step === 3 || this.linkExisting.pairStatus === 'paired')) {
+        this.refresh().then(() => {
+          this.select(this.linkExisting.newProjectId)
+          this.activeTab = 'overview'
+          this.linkExisting.open = false
+        })
+      } else {
+        this.linkExisting.open = false
+      }
+    },
+    async linkExistingStep1Next() {
+      this.linkExisting.error = null
+      this.linkExisting.busy = true
+      this.linkExisting.warnings = []
+      try {
+        const r = await fetch('/api/projects/link-existing', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            projectDir: this.linkExisting.projectDir,
+            account: this.linkExisting.account,
+            template: this.linkExisting.template,
+            ownerJid: (this.linkExisting.ownerJid || '').trim() || undefined,
+          }),
+        })
+        const d = await r.json()
+        if (!d.ok) { this.linkExisting.error = d.err ?? 'link failed'; return }
+        this.linkExisting.newProjectId = d.id
+        this.linkExisting.warnings = d.warnings ?? []
+        await this.refresh()
+        this.linkExisting.step = 2
+        await this.linkExistingStartPair()
+      } finally {
+        this.linkExisting.busy = false
+      }
+    },
+    async linkExistingStartPair() {
+      this.linkExisting.pairStatus = 'starting'
+      const startRes = await fetch(`/api/projects/${this.linkExisting.newProjectId}/pair/start`, { method: 'POST' })
+      const startData = await startRes.json()
+      if (!startData.ok) {
+        this.linkExisting.pairStatus = 'error'
+        this.linkExisting.pairError = startData.err ?? 'unknown'
+        return
+      }
+      const es = new EventSource(`/api/projects/${this.linkExisting.newProjectId}/pair/stream`)
+      this.linkExisting.eventSource = es
+      es.addEventListener('qr_image', (e) => {
+        this.linkExisting.qrDataUrl = e.data
+        this.linkExisting.pairStatus = 'qr'
+      })
+      es.addEventListener('status', (e) => {
+        const d = e.data
+        if (d === 'paired') {
+          this.linkExisting.pairStatus = 'paired'
+          try { es.close() } catch {}
+          this.linkExisting.eventSource = null
+          this.refresh()
+          setTimeout(() => this.refresh(), 3000)
+        } else if (d.startsWith('error:')) {
+          this.linkExisting.pairStatus = 'error'
+          this.linkExisting.pairError = d.slice(6)
+        }
+      })
+      es.addEventListener('log', (e) => { console.debug('[link-pair log]', e.data) })
+      es.onerror = () => {
+        if (this.linkExisting.pairStatus === 'paired' || this.linkExisting.pairStatus === 'error') {
+          try { es.close() } catch {}
+        }
+      }
+    },
+
     async select(id) {
       if (this.isDirty()) {
         if (!confirm('You have unsaved changes. Switch project anyway?')) {
@@ -239,6 +366,7 @@ function app() {
         this.loadConversations(),
         this.loadTurns(),
         this.loadExtraMcps(),
+        this.loadOwnerJid(),
         this.pollLiveState(),
       ])
       this.connectTrace()

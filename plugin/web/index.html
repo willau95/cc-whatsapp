@@ -92,6 +92,14 @@
             <div class="text-xs text-zinc-400 mt-1">New folder → init files → scan WhatsApp QR → ready</div>
           </button>
 
+          <!-- Link existing project -->
+          <button @click="openLinkExisting()"
+                  class="bg-blue-900/20 border-2 border-dashed border-blue-700 rounded-xl p-6 hover:border-blue-500 hover:bg-blue-900/30 transition text-left">
+            <div class="text-3xl mb-2">🔗</div>
+            <div class="font-bold text-blue-300">Link existing project</div>
+            <div class="text-xs text-zinc-400 mt-1">Use an existing cwd. WA chat with "owner JID" shares session with your terminal claude.</div>
+          </button>
+
           <!-- Existing projects -->
           <template x-for="p in projects" :key="p.id">
             <button @click="select(p.id); activeTab = 'overview'"
@@ -595,6 +603,21 @@
           </template>
         </dl>
 
+        <!-- Owner JID config -->
+        <h3 class="text-sm font-bold uppercase tracking-wider text-blue-300 mb-3">Owner JID — share session with terminal</h3>
+        <div class="bg-blue-900/10 border border-blue-700/30 rounded-xl p-4 mb-6 space-y-3">
+          <p class="text-xs text-zinc-400 leading-relaxed">
+            Designate one JID as "owner". WhatsApp messages from that JID use the SAME session UUID as your project's terminal claude → both share conversation state. When you run <code>claude</code> in this dir, the WA chat continues that conversation. Concurrent writes serialized via lock check (router will defer if you're actively running claude in terminal).
+          </p>
+          <div class="flex gap-2">
+            <input x-model="ownerJidDraft" type="text" placeholder="60123456789@s.whatsapp.net (your own number's JID)"
+                   class="flex-1 px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+            <button @click="saveOwnerJid()" class="px-4 py-2 rounded bg-blue-600 hover:bg-blue-500 text-white text-sm">💾 Save</button>
+            <button x-show="ownerJidDraft" @click="ownerJidDraft = ''; saveOwnerJid()" class="px-3 py-2 rounded border border-zinc-700 hover:bg-zinc-800 text-xs text-zinc-400">clear</button>
+          </div>
+          <p x-show="ownerJidInfo" class="text-xs text-blue-300" x-text="ownerJidInfo"></p>
+        </div>
+
         <h3 class="text-sm font-bold uppercase tracking-wider text-red-400 mb-3">Danger zone</h3>
         <div class="bg-red-900/20 border border-red-700/40 rounded-xl p-5 space-y-3">
           <div>
@@ -692,6 +715,95 @@
               class="flex-1 bg-zinc-950 p-6 text-sm font-mono leading-relaxed outline-none whitespace-pre-wrap resize-none"
               spellcheck="false"
               placeholder="(empty — write things to remember about this contact)"></textarea>
+  </div>
+</div>
+
+<!-- ─────── LINK EXISTING PROJECT MODAL ─────── -->
+<div x-show="linkExisting.open" x-transition.opacity
+     class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" @click.self="closeLinkExisting()">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-2xl flex flex-col">
+    <header class="border-b border-zinc-800 px-6 py-4 flex items-center gap-4">
+      <h3 class="text-lg font-bold">
+        <span x-show="linkExisting.step === 1">🔗 Link existing project</span>
+        <span x-show="linkExisting.step === 2">📲 Pair WhatsApp number</span>
+        <span x-show="linkExisting.step === 3">🎉 Linked!</span>
+      </h3>
+      <div class="flex-1"></div>
+      <button @click="closeLinkExisting()" class="text-zinc-500 hover:text-zinc-200 text-xl">×</button>
+    </header>
+    <div class="p-6 space-y-4 flex-1 overflow-y-auto">
+      <div x-show="linkExisting.step === 1" class="space-y-4">
+        <div class="bg-blue-900/20 border border-blue-700/30 rounded-lg p-3 text-xs text-zinc-300">
+          <strong>Use case:</strong> You have a claude-code project (any cwd you've used <code>claude</code> in). Link WhatsApp so DMs from a designated "owner" JID become a remote terminal — same session UUID, shared conversation state.
+        </div>
+        <div>
+          <label class="text-sm font-medium block mb-1">Project directory (absolute path)</label>
+          <input x-model="linkExisting.projectDir" type="text" placeholder="/Users/you/Desktop/some-project"
+                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+          <p class="text-xs text-zinc-500 mt-1">Must already exist. We add <code>.claude/cc-whatsapp/</code> inside it.</p>
+        </div>
+        <div>
+          <label class="text-sm font-medium block mb-1">wacli account name</label>
+          <input x-model="linkExisting.account" type="text" placeholder="my-account"
+                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+          <p class="text-xs text-zinc-500 mt-1">a-z 0-9 _ -, max 40 chars. The WhatsApp number you'll pair to this project.</p>
+        </div>
+        <div>
+          <label class="text-sm font-medium block mb-1">Owner JID (optional, set later if unknown)</label>
+          <input x-model="linkExisting.ownerJid" type="text" placeholder="60123456789@s.whatsapp.net  OR leave blank"
+                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+          <p class="text-xs text-zinc-500 mt-1">YOUR personal WhatsApp number's JID (the one you'll DM the bot from). Its WA chat = shares terminal session.</p>
+        </div>
+        <div>
+          <label class="text-sm font-medium block mb-1">Persona template (skipped if agent/ already has md files)</label>
+          <select x-model="linkExisting.template" class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm">
+            <template x-for="t in availableTemplates" :key="t.id">
+              <option :value="t.id" x-text="t.icon + ' ' + t.label"></option>
+            </template>
+          </select>
+        </div>
+        <p x-show="linkExisting.error" class="text-sm text-red-400" x-text="linkExisting.error"></p>
+        <template x-for="w in linkExisting.warnings" :key="w">
+          <p class="text-xs text-amber-300">⚠ <span x-text="w"></span></p>
+        </template>
+      </div>
+
+      <div x-show="linkExisting.step === 2" class="space-y-4">
+        <p class="text-sm text-zinc-400">Scan with WhatsApp → ⚙️ Settings → Linked Devices → Link a Device.</p>
+        <div class="flex justify-center bg-white p-6 rounded-xl min-h-[300px] items-center">
+          <img x-show="linkExisting.qrDataUrl" :src="linkExisting.qrDataUrl" alt="QR" class="w-64 h-64" />
+          <div x-show="!linkExisting.qrDataUrl && linkExisting.pairStatus !== 'paired'" class="text-zinc-400 text-sm">
+            <span x-show="linkExisting.pairStatus === 'starting'">⏳ generating QR…</span>
+            <span x-show="linkExisting.pairStatus === 'error'" class="text-red-600" x-text="linkExisting.pairError"></span>
+          </div>
+          <div x-show="linkExisting.pairStatus === 'paired'" class="text-emerald-600 text-2xl">✓ Linked!</div>
+        </div>
+        <div class="text-center text-sm">
+          <div x-show="linkExisting.pairStatus === 'qr'" class="text-amber-400">📱 waiting for scan…</div>
+          <div x-show="linkExisting.pairStatus === 'paired'" class="text-emerald-400">✓ Done. Router auto-starting…</div>
+          <div x-show="linkExisting.pairStatus === 'error'" class="text-red-400" x-text="'❌ ' + linkExisting.pairError"></div>
+        </div>
+      </div>
+
+      <div x-show="linkExisting.step === 3" class="text-center py-8">
+        <div class="text-5xl mb-4">🎉</div>
+        <p class="text-lg font-bold mb-2">Linked + ready</p>
+        <p class="text-sm text-zinc-400">Project at <code class="text-emerald-300" x-text="linkExisting.projectDir"></code></p>
+        <p x-show="linkExisting.ownerJid" class="text-xs text-blue-300 mt-3">Owner JID set: <code x-text="linkExisting.ownerJid"></code> — its WA messages share session with your terminal claude.</p>
+      </div>
+    </div>
+    <footer class="border-t border-zinc-800 px-6 py-3 flex items-center gap-3">
+      <div class="flex-1"></div>
+      <button x-show="linkExisting.step === 1" @click="linkExistingStep1Next()"
+              :disabled="!linkExisting.projectDir || !linkExisting.account || linkExisting.busy"
+              class="text-sm px-4 py-2 rounded bg-blue-600 hover:bg-blue-500 text-white disabled:bg-zinc-700"
+              x-text="linkExisting.busy ? 'Working…' : 'Next: pair WhatsApp →'"></button>
+      <button x-show="linkExisting.step === 2 && linkExisting.pairStatus === 'paired'"
+              @click="linkExisting.step = 3"
+              class="text-sm px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white">Continue →</button>
+      <button x-show="linkExisting.step === 3" @click="closeLinkExisting()"
+              class="text-sm px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white">Open project ✓</button>
+    </footer>
   </div>
 </div>
 

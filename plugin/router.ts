@@ -60,11 +60,25 @@ const MAX_PROMPT_CHARS = 8_000
 // ─── Per-project wacli account ───
 // Each project pairs its own WhatsApp number under wacli's multi-account
 // system. Account name is set by /cc-whatsapp:init wizard.
-function loadProjectConfig(): { account?: string } {
+function loadProjectConfig(): { account?: string; ownerJid?: string; port?: number } {
   try { return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) }
   catch { return {} }
 }
 const WACLI_ACCOUNT = loadProjectConfig().account ?? 'main'
+
+// Track our own spawned claude PIDs so we can distinguish from external
+// `claude --resume <uuid>` processes (i.e., user running claude in a terminal
+// with the same session UUID — happens when Owner JID is set so the WA chat
+// shares state with the user's terminal session).
+const ourClaudePids = new Set<number>()
+function isSessionInUseByExternal(uuid: string): boolean {
+  try {
+    const r = spawnSync('pgrep', ['-f', `claude.*${uuid}`], { stdio: ['ignore', 'pipe', 'ignore'] })
+    if (r.status !== 0 || !r.stdout) return false
+    const pids = r.stdout.toString().trim().split('\n').map(s => parseInt(s, 10)).filter(Number.isFinite)
+    return pids.some(p => !ourClaudePids.has(p))
+  } catch { return false }
+}
 
 // ─── Tunables (re-read from disk every time so dashboard edits go live) ───
 // tunables.json overrides env-var defaults. Dashboard writes it; we read it.
@@ -520,6 +534,21 @@ async function triggerClaude(jid: string): Promise<void> {
   const p = getPending(jid)
   p.timer = null
   if (p.batch.length === 0) { p.state = 'IDLE'; return }
+
+  // Owner-JID session sharing: if this JID's session UUID is currently held
+  // by an external claude process (user's terminal), defer to avoid interleaved
+  // JSONL appends. State stays as PRE_REPLY so new inbound joins this batch.
+  const ownerJid = loadProjectConfig().ownerJid
+  if (ownerJid && jid === ownerJid) {
+    const sess = getOrCreateSession(jid)
+    if (isSessionInUseByExternal(sess.uuid)) {
+      trace('claude_deferred_session_in_use', { jid, uuid: sess.uuid, retry_in_s: 30 })
+      writeStateSnapshot()
+      p.timer = setTimeout(() => triggerClaude(jid), 30_000)
+      return
+    }
+  }
+
   p.state = 'CLAUDE_RUNNING'
   const batchSnapshot = p.batch.slice()
   p.batch = []  // new msgs from now on accumulate to the NEXT batch
@@ -571,11 +600,13 @@ function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startM
 
   const heartbeat = startTyping(jid)
   const child = spawn(CLAUDE_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+  if (child.pid) ourClaudePids.add(child.pid)
   let stdoutBuf = ''
   let stderrBuf = ''
   child.stdout.on('data', d => { stdoutBuf += d.toString() })
   child.stderr.on('data', d => { stderrBuf += d.toString() })
   child.on('exit', code => {
+    if (child.pid) ourClaudePids.delete(child.pid)
     clearInterval(heartbeat)
     stopTyping(jid)
     const durationMs = Date.now() - startMs

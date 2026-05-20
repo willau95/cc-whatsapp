@@ -430,6 +430,93 @@ function applyPersonaTemplate(projectId: string, templateId: string): { ok: bool
 
 // ─── New project creation ──────────────────────────────────────────────────
 
+// Look up the most-recently-active claude code session UUID for a given cwd.
+// Used when Owner JID is set: we pre-populate sessions.json[ownerJid] with this
+// UUID so the WhatsApp chat from that JID shares state with the user's terminal.
+function findLatestSessionUuid(projectPath: string): string | null {
+  // claude code stores sessions at ~/.claude/projects/-Users-foo-bar-baz/<uuid>.jsonl
+  // where the dir name is cwd with /→- prepended with -.
+  const claudeHash = projectPath.replace(/\//g, '-')
+  const dir = join(homedir(), '.claude', 'projects', claudeHash)
+  if (!existsSync(dir)) return null
+  try {
+    const files = readdirSync(dir).filter(f => f.endsWith('.jsonl'))
+    if (files.length === 0) return null
+    files.sort((a, b) => statSync(join(dir, b)).mtimeMs - statSync(join(dir, a)).mtimeMs)
+    return files[0]!.replace(/\.jsonl$/, '')
+  } catch { return null }
+}
+
+// Init a cc-whatsapp project in an EXISTING directory (vs createProject which
+// makes a fresh subdir). Persona templates only applied if no agent/ files
+// already exist. Skips overwriting existing config.json fields.
+function linkExistingProject(opts: { projectDir: string; account: string; template?: string; ownerJid?: string }): { ok: boolean; id?: string; err?: string; warnings?: string[] } {
+  const { projectDir, account } = opts
+  if (!SAFE_NAME.test(account)) return { ok: false, err: 'account name must be a-z 0-9 _ - (max 40 chars)' }
+  if (!existsSync(projectDir)) return { ok: false, err: `directory does not exist: ${projectDir}` }
+  try {
+    const st = statSync(projectDir)
+    if (!st.isDirectory()) return { ok: false, err: `not a directory: ${projectDir}` }
+  } catch (err) { return { ok: false, err: String(err) } }
+
+  const stateDir = join(projectDir, '.claude', 'cc-whatsapp')
+  if (existsSync(join(stateDir, 'config.json'))) {
+    return { ok: false, err: `already a cc-whatsapp project: ${projectDir}` }
+  }
+  const warnings: string[] = []
+
+  const agentDir = join(stateDir, 'agent')
+  const contactsDir = join(agentDir, 'contacts')
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 })
+  mkdirSync(agentDir, { recursive: true, mode: 0o700 })
+  mkdirSync(contactsDir, { recursive: true, mode: 0o700 })
+
+  // Owner JID lookup: find latest session UUID for this cwd, pre-populate.
+  const sessions: Record<string, string> = {}
+  if (opts.ownerJid) {
+    const uuid = findLatestSessionUuid(projectDir)
+    if (uuid) {
+      sessions[opts.ownerJid] = uuid
+    } else {
+      warnings.push(`No existing claude session found at ~/.claude/projects/<cwd-hash>/ — owner JID will get a fresh session UUID on first message. Run "claude" in the project directory once first if you want to share an existing terminal session.`)
+    }
+  }
+
+  writeJsonAtomic(join(stateDir, 'config.json'), {
+    account,
+    ...(opts.ownerJid ? { ownerJid: opts.ownerJid } : {}),
+  })
+  writeJsonAtomic(join(stateDir, 'access.json'), { allowFrom: [], mode: 'open' })
+  writeJsonAtomic(join(stateDir, 'sessions.json'), sessions)
+  writeJsonAtomic(join(stateDir, 'tunables.json'), {})
+
+  // Persona templates: apply only if agent/ is empty (don't overwrite existing files)
+  const personaExists = ['IDENTITY', 'SOUL', 'STYLE', 'AGENTS', 'MEMORY']
+    .some(n => existsSync(join(agentDir, `${n}.md`)))
+  if (!personaExists) {
+    const tplId = opts.template || 'eva'
+    const tpl = readTemplateFiles(tplId) ?? readTemplateFiles('eva')
+    if (tpl) {
+      for (const [name, content] of Object.entries(tpl)) {
+        writeFileAtomic(join(agentDir, name), content)
+      }
+    }
+  } else {
+    warnings.push('Persona files already exist in agent/ — skipped template install')
+  }
+
+  try {
+    const src = join(TEMPLATES_AGENT, 'contacts', 'TEMPLATE.md')
+    if (existsSync(src) && !existsSync(join(contactsDir, 'TEMPLATE.md'))) {
+      copyFileSync(src, join(contactsDir, 'TEMPLATE.md'))
+    }
+  } catch {}
+
+  const id = pathToId(projectDir)
+  generateRunCommand(id)
+  return { ok: true, id, warnings }
+}
+
 const SAFE_NAME = /^[a-z0-9_-]{1,40}$/i
 
 function createProject(opts: { parentDir: string; name: string; account: string; template?: string }): { ok: boolean; id?: string; err?: string } {
@@ -930,6 +1017,17 @@ const server = (globalThis as any).Bun.serve({
       })
       return json(result, result.ok ? 200 : 400)
     }
+    // Link an EXISTING directory (alternative to createProject)
+    if (p === '/api/projects/link-existing' && req.method === 'POST') {
+      const body = await req.json() as any
+      const result = linkExistingProject({
+        projectDir: body.projectDir,
+        account: body.account,
+        template: body.template ?? 'eva',
+        ownerJid: body.ownerJid,
+      })
+      return json(result, result.ok ? 200 : 400)
+    }
 
     if (p === '/api/templates' && req.method === 'GET') {
       return json(listTemplates())
@@ -1134,6 +1232,33 @@ const server = (globalThis as any).Bun.serve({
       if (sub === '/open-terminal' && req.method === 'POST') {
         const body = await req.json().catch(() => ({})) as { jid?: string }
         return json(openClaudeTerminal(id, body.jid))
+      }
+
+      // OWNER JID (the JID whose WA chat shares session UUID with terminal)
+      if (sub === '/owner-jid' && req.method === 'GET') {
+        const cfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
+        return json({ ownerJid: cfg.ownerJid ?? null })
+      }
+      if (sub === '/owner-jid' && req.method === 'PUT') {
+        const body = await req.json() as { ownerJid: string | null }
+        const cfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
+        const projectPath = idToPath(id)
+        const sessions = readJsonSafe(join(stateDir, 'sessions.json')) ?? {}
+        if (body.ownerJid) {
+          cfg.ownerJid = body.ownerJid
+          // Pre-populate the JID's session UUID with the latest terminal session
+          // for this cwd. If user later runs `claude --resume <uuid>` in terminal,
+          // both will share state.
+          const uuid = findLatestSessionUuid(projectPath)
+          if (uuid && !sessions[body.ownerJid]) {
+            sessions[body.ownerJid] = uuid
+            writeJsonAtomic(join(stateDir, 'sessions.json'), sessions)
+          }
+        } else {
+          delete cfg.ownerJid
+        }
+        writeJsonAtomic(join(stateDir, 'config.json'), cfg)
+        return json({ ok: true, ownerJid: cfg.ownerJid ?? null, sessionUuid: sessions[body.ownerJid || ''] ?? null })
       }
 
       // EXTRA MCPS
