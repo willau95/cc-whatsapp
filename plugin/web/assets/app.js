@@ -174,8 +174,9 @@ function app() {
       pairStatus: 'idle',
       pairError: '',
       pairAlreadyDone: false,
-      qrDataUrl: '',         // populated by renderQrToState
+      qrDataUrl: '',         // server-rendered PNG dataURL
       qrTextDebug: '',       // shown in <details> for debugging
+      qrRotateCount: 0,      // how many fresh QR codes have arrived
       eventSource: null,
     },
 
@@ -663,15 +664,18 @@ function app() {
       }
       const es = new EventSource(`/api/projects/${this.wizard.newProjectId}/pair/stream`)
       this.wizard.eventSource = es
-      es.addEventListener('qr', async (e) => {
+      // The 'qr' event carries the raw QR string (debug only).
+      // The 'qr_image' event carries the server-rendered PNG dataURL — that's what we display.
+      es.addEventListener('qr', (e) => {
         this.wizard.pairStatus = 'qr'
         this.wizard.qrTextDebug = `len=${e.data.length} preview=${e.data.slice(0, 48)}…`
-        try {
-          this.wizard.qrDataUrl = await this.qrToDataUrl(e.data)
-        } catch (err) {
-          console.error('wizard QR render failed', err)
-          this.wizard.pairError = 'QR render failed: ' + err
-        }
+      })
+      es.addEventListener('qr_image', (e) => {
+        this.wizard.qrDataUrl = e.data
+        this.wizard.pairStatus = 'qr'
+      })
+      es.addEventListener('qr_rotate', (e) => {
+        this.wizard.qrRotateCount = Number(e.data) || 0
       })
       es.addEventListener('status', (e) => {
         const d = e.data
@@ -706,14 +710,12 @@ function app() {
       }
       const es = new EventSource(`/api/projects/${this.selectedId}/pair/stream`)
       this.pairModal.eventSource = es
-      es.addEventListener('qr', async (e) => {
+      es.addEventListener('qr', (e) => {
         this.pairModal.status = 'qr'
-        try {
-          this.pairModal.qrDataUrl = await this.qrToDataUrl(e.data)
-        } catch (err) {
-          console.error('pair QR render failed', err)
-          this.pairModal.error = 'QR render failed: ' + err
-        }
+      })
+      es.addEventListener('qr_image', (e) => {
+        this.pairModal.qrDataUrl = e.data
+        this.pairModal.status = 'qr'
       })
       es.addEventListener('status', (e) => {
         const d = e.data
@@ -735,16 +737,8 @@ function app() {
       this.pairModal = { open: false, status: 'idle', error: '', qrDataUrl: '', eventSource: null }
     },
 
-    // Renders QR to a data: URL (works in img tag — no canvas timing problems).
-    qrToDataUrl(text) {
-      if (!text) return Promise.reject(new Error('empty QR text'))
-      if (!window.QRCode) return Promise.reject(new Error('QRCode lib not loaded'))
-      return new Promise((resolve, reject) => {
-        window.QRCode.toDataURL(text, { width: 280, margin: 2, errorCorrectionLevel: 'M' }, (err, url) => {
-          if (err) reject(err); else resolve(url)
-        })
-      })
-    },
+    // QR rendering is server-side (dashboard.ts uses qrcode npm pkg via Bun).
+    // PNG dataURL arrives via SSE 'qr_image' event — we just set img.src.
 
     // ─── project delete ───
     async deleteProject() {

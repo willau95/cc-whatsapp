@@ -25,6 +25,7 @@ import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { spawn, type ChildProcess } from 'child_process'
+import QRCode from 'qrcode'
 
 const PLUGIN_ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = dirname(PLUGIN_ROOT)
@@ -537,6 +538,8 @@ type PairSession = {
   account: string
   projectId: string
   qrText: string                       // latest QR string (text format)
+  qrDataUrl: string                    // latest QR rendered to data:image/png base64
+  qrRotateCount: number                // how many fresh QRs we've broadcast
   status: 'qr' | 'paired' | 'error' | 'timeout' | 'starting'
   errorMsg?: string
   subscribers: Set<(evt: string) => void>
@@ -563,7 +566,7 @@ function startPair(projectId: string): { ok: boolean; err?: string } {
 
   const sess: PairSession = {
     child, account, projectId,
-    qrText: '',
+    qrText: '', qrDataUrl: '', qrRotateCount: 0,
     status: 'starting',
     subscribers: new Set(),
   }
@@ -576,23 +579,38 @@ function startPair(projectId: string): { ok: boolean; err?: string } {
     }
   }
 
+  // Server-side render QR text → PNG dataURL. Run async; broadcast when ready.
+  const renderAndBroadcastQr = async (qrText: string): Promise<void> => {
+    try {
+      const dataUrl = await QRCode.toDataURL(qrText, { margin: 2, width: 280, errorCorrectionLevel: 'M' })
+      sess.qrDataUrl = dataUrl
+      sess.qrRotateCount++
+      broadcast('qr_image', dataUrl)
+      broadcast('qr_rotate', String(sess.qrRotateCount))
+      process.stderr.write(`[pair:${sess.account}] qr rendered (rotate #${sess.qrRotateCount}, len=${dataUrl.length})\n`)
+    } catch (err) {
+      process.stderr.write(`[pair:${sess.account}] QR render failed: ${err}\n`)
+      broadcast('status', `error:QR render failed: ${err}`)
+    }
+  }
+
   let stdoutBuf = ''
   let stderrBuf = ''
 
   child.stdout?.on('data', d => {
     const text = d.toString()
     stdoutBuf += text
-    // Each newline-terminated line is potentially a QR string. With --qr-format text,
-    // QR is printed as a single line of variable length (often starts with "2@").
     let nl: number
     while ((nl = stdoutBuf.indexOf('\n')) !== -1) {
       const line = stdoutBuf.slice(0, nl).trim()
       stdoutBuf = stdoutBuf.slice(nl + 1)
       if (!line) continue
-      if (line.length > 20 && (line.includes(',') || line.startsWith('2@'))) {
+      if (line.startsWith('2@') && line.length > 50) {
+        if (line === sess.qrText) continue   // de-dup if stderr already broadcast it
         sess.qrText = line
         sess.status = 'qr'
         broadcast('qr', line)
+        renderAndBroadcastQr(line)
       }
     }
   })
@@ -620,9 +638,12 @@ function startPair(projectId: string): { ok: boolean; err?: string } {
         const msg: string | undefined = evt.data?.message
         process.stderr.write(`[pair:${sess.account}] ${name} ${code ? '(code: ' + String(code).slice(0,40) + '...)' : ''} ${msg ?? ''}\n`)
         if (name === 'qr_code' && typeof code === 'string' && code.length > 10) {
-          sess.qrText = code
-          sess.status = 'qr'
-          broadcast('qr', code)
+          if (code !== sess.qrText) {
+            sess.qrText = code
+            sess.status = 'qr'
+            broadcast('qr', code)
+            renderAndBroadcastQr(code)
+          }
         } else if (name === 'login_success' || name === 'paired' || name === 'logged_in' || name === 'auth_complete' || name === 'authenticated' || name === 'pair_success') {
           sess.status = 'paired'
           broadcast('status', 'paired')
@@ -735,6 +756,7 @@ function startTraceWatchers(): void {
 const server = (globalThis as any).Bun.serve({
   hostname: '127.0.0.1',
   port: PORT,
+  idleTimeout: 255,    // SSE pairing streams sit idle between QR rotates (~20s) — default 10s breaks them
   websocket: {
     message() {},
     open(ws: any) {
@@ -836,12 +858,15 @@ const server = (globalThis as any).Bun.serve({
             }
             controller.enqueue(enc.encode(`event: status\ndata: ${sess.status}\n\n`))
             if (sess.qrText) controller.enqueue(enc.encode(`event: qr\ndata: ${sess.qrText}\n\n`))
+            if (sess.qrDataUrl) controller.enqueue(enc.encode(`event: qr_image\ndata: ${sess.qrDataUrl}\n\n`))
+            if (sess.qrRotateCount > 0) controller.enqueue(enc.encode(`event: qr_rotate\ndata: ${sess.qrRotateCount}\n\n`))
             for (const m of queue) controller.enqueue(enc.encode(m))
             queue = []
-            // heartbeat every 15s to keep connection alive
+            // heartbeat every 7s — must be < Bun's idleTimeout (per-request) AND
+            // < any reverse-proxy timeout. Also keeps the EventSource browser-side from reconnecting.
             const hb = setInterval(() => {
               try { controller.enqueue(enc.encode(`: heartbeat\n\n`)) } catch { clearInterval(hb) }
-            }, 15_000)
+            }, 7_000)
             ;(this as any)._hb = hb
           },
           cancel() {
