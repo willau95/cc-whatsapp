@@ -137,25 +137,42 @@ function writeFileAtomic(path: string, data: string): void {
 // Router reads on every turn (fresh per webhook), so changes apply live.
 
 type Tunables = {
-  collect_window_ms?: number      // default 60000
-  pre_reply_min_ms?: number       // default 30000
-  pre_reply_max_ms?: number       // default 60000
-  quote_reply_probability?: number // 0-1, default 0.4 (~40%)
-  multi_msg_max_segments?: number  // default 4
-  inter_segment_min_ms?: number    // default 800
-  inter_segment_max_ms?: number    // default 2200
-  chat_model?: string              // claude-haiku-4-5-20251001
+  // ─ Basics: timing of replies (the most-visible humanlike feel) ─
+  collect_window_ms?: number
+  pre_reply_min_ms?: number
+  pre_reply_max_ms?: number
+  inter_segment_min_ms?: number
+  inter_segment_max_ms?: number
+  // ─ Reply behaviour ─
+  quote_reply_probability?: number    // 0–1
+  multi_msg_max_segments?: number     // 1–8
+  enable_typing_indicator?: boolean   // shows "typing…" in WhatsApp
+  // ─ Brain ─
+  chat_model?: string                 // anthropic model id
+  max_prompt_chars?: number           // truncate single inbound msg at this length
+  // ─ Length-scaling factors for inter-segment delay (multiplied with min/max) ─
+  length_factor_short?: number        // text < 20 chars (default 0.5)
+  length_factor_medium?: number       // text 20–100 chars (default 1.0)
+  length_factor_long?: number         // text > 100 chars (default 1.6)
+  // ─ Experimental — future-flagged ─
+  quiet_hours_start?: number          // 0–23, empty = disabled (not yet wired)
+  quiet_hours_end?: number
 }
 
 const TUNABLES_DEFAULTS: Tunables = {
   collect_window_ms: 60_000,
   pre_reply_min_ms: 30_000,
   pre_reply_max_ms: 60_000,
-  quote_reply_probability: 0.4,
-  multi_msg_max_segments: 4,
   inter_segment_min_ms: 800,
   inter_segment_max_ms: 2200,
+  quote_reply_probability: 0.4,
+  multi_msg_max_segments: 4,
+  enable_typing_indicator: true,
   chat_model: 'claude-haiku-4-5-20251001',
+  max_prompt_chars: 8000,
+  length_factor_short: 0.5,
+  length_factor_medium: 1.0,
+  length_factor_long: 1.6,
 }
 
 function loadTunables(id: string): Tunables {
@@ -192,6 +209,141 @@ function listContacts(id: string): { jid: string; size: number; mtime: string }[
     } catch {}
   }
   return out.sort((a, b) => b.mtime.localeCompare(a.mtime))
+}
+
+// Conversation list: WhatsApp-native (display name, last msg, count).
+// Combines: allowlist JIDs ∪ contact files ∪ recent webhook traces.
+function listConversations(id: string): Array<{
+  jid: string
+  displayName: string
+  lastText: string
+  lastTimestamp: string
+  lastFromMe: boolean
+  initials: string
+  contactFileExists: boolean
+}> {
+  const stateDir = getStateDir(id)
+  const access = readJsonSafe(join(stateDir, 'access.json')) ?? { allowFrom: [] }
+  const account = readJsonSafe(join(stateDir, 'config.json'))?.account ?? 'main'
+  const seen = new Set<string>(access.allowFrom ?? [])
+
+  // Also include JIDs that have a contact file
+  try {
+    for (const f of readdirSync(join(stateDir, 'agent', 'contacts'))) {
+      if (f.endsWith('.md') && f !== 'TEMPLATE.md') seen.add(f.replace(/\.md$/, ''))
+    }
+  } catch {}
+
+  const conversations: any[] = []
+  for (const jid of seen) {
+    // Pull display name + last msg via wacli messages list
+    let displayName = jid
+    let lastText = ''
+    let lastTimestamp = ''
+    let lastFromMe = false
+    try {
+      const r = Bun.spawnSync({
+        cmd: [join(REPO_ROOT, 'bin', 'cc-whatsapp'), '--account', account, 'messages', 'list', '--chat', jid, '--limit', '1', '--json'],
+        stdout: 'pipe', stderr: 'pipe',
+      })
+      const out = new TextDecoder().decode(r.stdout)
+      const parsed = JSON.parse(out)
+      const m = parsed?.data?.messages?.[0]
+      if (m) {
+        displayName = m.SenderName === 'me' ? (m.ChatName || jid) : (m.SenderName || m.ChatName || jid)
+        lastText = m.Text || (m.MediaType ? `[${m.MediaType}]` : '')
+        lastTimestamp = m.Timestamp ?? ''
+        lastFromMe = !!m.FromMe
+      }
+    } catch {}
+
+    // Fallback display name from contact file's "PushName:" field
+    if (displayName === jid) {
+      try {
+        const md = readFileSync(join(stateDir, 'agent', 'contacts', `${jid}.md`), 'utf8')
+        const m = md.match(/PushName[:：]\s*(.+)/i) || md.match(/真名[^：:]*[:：]\s*(.+)/i)
+        if (m && m[1] && !m[1].includes('*')) displayName = m[1].trim()
+      } catch {}
+    }
+
+    const initials = displayName
+      .split(/\s+/).slice(0, 2)
+      .map(s => s.match(/[a-zA-Z]/) ? s[0]!.toUpperCase() : s[0])
+      .filter(Boolean).join('') || '?'
+
+    conversations.push({
+      jid, displayName, lastText, lastTimestamp, lastFromMe, initials,
+      contactFileExists: existsSync(join(stateDir, 'agent', 'contacts', `${jid}.md`)),
+    })
+  }
+  return conversations.sort((a, b) => (b.lastTimestamp || '').localeCompare(a.lastTimestamp || ''))
+}
+
+function fetchConversationMessages(id: string, jid: string, limit: number): {
+  jid: string; messages: Array<{ id: string; text: string; mediaType: string; ts: string; fromMe: boolean; sender: string }>;
+} {
+  const account = readJsonSafe(join(getStateDir(id), 'config.json'))?.account ?? 'main'
+  try {
+    const r = Bun.spawnSync({
+      cmd: [join(REPO_ROOT, 'bin', 'cc-whatsapp'), '--account', account, 'messages', 'list', '--chat', jid, '--limit', String(limit), '--json', '--full'],
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    const parsed = JSON.parse(new TextDecoder().decode(r.stdout))
+    const msgs = (parsed?.data?.messages ?? []).map((m: any) => ({
+      id: m.MsgID, text: m.Text || '', mediaType: m.MediaType || '',
+      ts: m.Timestamp, fromMe: !!m.FromMe, sender: m.SenderName || '',
+    })).reverse()  // oldest first for chat display
+    return { jid, messages: msgs }
+  } catch {
+    return { jid, messages: [] }
+  }
+}
+
+function listTurns(id: string, limit: number): Array<{
+  turnId: string; startedAt: string; endedAt: string; durationMs?: number;
+  jid: string; batchSize: number; code?: number; model: string;
+}> {
+  const tdir = join(getStateDir(id), 'turns')
+  if (!existsSync(tdir)) return []
+  let dirs: string[]
+  try { dirs = readdirSync(tdir) } catch { return [] }
+  dirs.sort().reverse()
+  const out: any[] = []
+  for (const d of dirs.slice(0, limit)) {
+    const dir = join(tdir, d)
+    const batch = readJsonSafe(join(dir, 'batch.json'))
+    const exit = readJsonSafe(join(dir, 'exit.json'))
+    if (!batch) continue
+    out.push({
+      turnId: d,
+      startedAt: batch.started_at,
+      endedAt: exit?.ended_at ?? null,
+      durationMs: exit?.durationMs ?? null,
+      jid: batch.jid,
+      batchSize: batch.batchSize,
+      code: exit?.code ?? null,
+      model: batch.model,
+    })
+  }
+  return out
+}
+
+function loadTurn(id: string, turnId: string): any {
+  const dir = join(getStateDir(id), 'turns', turnId)
+  if (!existsSync(dir)) return null
+  const safeRead = (name: string): string => {
+    try { return readFileSync(join(dir, name), 'utf8') } catch { return '' }
+  }
+  return {
+    turnId,
+    batch: readJsonSafe(join(dir, 'batch.json')),
+    exit: readJsonSafe(join(dir, 'exit.json')),
+    prompt: safeRead('prompt.txt'),
+    persona: safeRead('persona.txt'),
+    stdout: safeRead('stdout.txt'),
+    stderr: safeRead('stderr.txt'),
+    error: safeRead('error.txt'),
+  }
 }
 
 // Tail last N lines of trace.log (cheap; trace.log is small).
@@ -414,6 +566,33 @@ const server = (globalThis as any).Bun.serve({
         const body = await req.text()
         writeFileAtomic(join(stateDir, 'agent', 'contacts', `${jid}.md`), body)
         return json({ ok: true })
+      }
+
+      // CONVERSATIONS (WhatsApp-native view: display name + last msg)
+      if (sub === '/conversations' && req.method === 'GET') {
+        return json(listConversations(id))
+      }
+      const convoMsgs = sub.match(/^\/conversations\/([^/]+)\/messages$/)
+      if (convoMsgs && req.method === 'GET') {
+        const jid = decodeURIComponent(convoMsgs[1])
+        const limit = Number(url.searchParams.get('limit') ?? 50)
+        return json(fetchConversationMessages(id, jid, limit))
+      }
+
+      // LIVE STATE (state machine snapshot the router writes)
+      if (sub === '/state' && req.method === 'GET') {
+        try { return json(JSON.parse(readFileSync(join(stateDir, 'state.json'), 'utf8'))) }
+        catch { return json({}) }
+      }
+
+      // TURNS (per-invocation snapshots — see what Claude saw + did)
+      if (sub === '/turns' && req.method === 'GET') {
+        const limit = Number(url.searchParams.get('limit') ?? 30)
+        return json(listTurns(id, limit))
+      }
+      const turnDetail = sub.match(/^\/turns\/([^/]+)$/)
+      if (turnDetail && req.method === 'GET') {
+        return json(loadTurn(id, turnDetail[1]))
       }
 
       // TRACE (one-shot tail; live updates via WS)

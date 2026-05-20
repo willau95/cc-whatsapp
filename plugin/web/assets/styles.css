@@ -11,3 +11,26 @@
 
 /* Textarea with monospace-friendly tab stops */
 textarea { tab-size: 2; }
+
+/* Slider styling (Tailwind doesn't fully style range) */
+input[type="range"] {
+  appearance: none;
+  background: #27272a;
+  height: 4px;
+  border-radius: 2px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #10b981;
+  cursor: pointer;
+  border: 2px solid #052e1e;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #10b981;
+  cursor: pointer;
+  border: 2px solid #052e1e;
+}

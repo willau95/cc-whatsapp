@@ -37,6 +37,8 @@ const CONFIG_FILE   = join(STATE_DIR, 'config.json')
 const ROUTER_PID    = join(STATE_DIR, 'router.pid')
 const SYNC_PID      = join(STATE_DIR, 'sync.pid')
 const TRACE_FILE    = join(STATE_DIR, 'trace.log')
+const STATE_SNAP    = join(STATE_DIR, 'state.json')   // live state machine snapshot (dashboard polls)
+const TURNS_DIR     = join(STATE_DIR, 'turns')         // per-turn prompt/response snapshots
 const AGENT_DIR     = join(STATE_DIR, 'agent')
 const CONTACTS_DIR  = join(AGENT_DIR, 'contacts')
 
@@ -74,11 +76,16 @@ type Tunables = {
   multi_msg_max_segments: number
   inter_segment_min_ms: number
   inter_segment_max_ms: number
+  enable_typing_indicator: boolean
   chat_model: string
+  max_prompt_chars: number
+  length_factor_short: number
+  length_factor_medium: number
+  length_factor_long: number
   dry_run: boolean
 }
 function tunables(): Tunables {
-  let stored: Partial<Tunables> = {}
+  let stored: any = {}
   try { stored = JSON.parse(readFileSync(TUNABLES_FILE, 'utf8')) } catch {}
   return {
     collect_window_ms: stored.collect_window_ms ?? Number(process.env.CC_WHATSAPP_COLLECT_WINDOW_MS ?? 60_000),
@@ -88,7 +95,12 @@ function tunables(): Tunables {
     multi_msg_max_segments:  stored.multi_msg_max_segments  ?? 4,
     inter_segment_min_ms:    stored.inter_segment_min_ms    ?? 800,
     inter_segment_max_ms:    stored.inter_segment_max_ms    ?? 2200,
+    enable_typing_indicator: stored.enable_typing_indicator !== false,  // default true
     chat_model: stored.chat_model ?? (process.env.CC_WHATSAPP_CHAT_MODEL ?? 'claude-haiku-4-5-20251001'),
+    max_prompt_chars: stored.max_prompt_chars ?? 8000,
+    length_factor_short:  stored.length_factor_short  ?? 0.5,
+    length_factor_medium: stored.length_factor_medium ?? 1.0,
+    length_factor_long:   stored.length_factor_long   ?? 1.6,
     dry_run: process.env.CC_WHATSAPP_DRY_RUN === '1',
   }
 }
@@ -315,6 +327,8 @@ async function buildPrompt(evt: any): Promise<{ prompt: string; jid: string; mes
 // to the .send.sock IPC and the running sync executes the presence call. No
 // secondary account needed.
 function startTyping(jid: string, kind: 'text' | 'voice' = 'text'): NodeJS.Timer {
+  // Tunable: respect enable_typing_indicator (per-project toggle).
+  if (!tunables().enable_typing_indicator) return setInterval(() => {}, 60_000)
   const args = ['--account', WACLI_ACCOUNT, 'presence', 'typing', '--to', jid]
   if (kind === 'voice') args.push('--media', 'audio')
   const fire = () => spawn(WACLI_BIN, args, { stdio: 'ignore' }).on('error', () => {})
@@ -412,13 +426,11 @@ function enqueueMessage(jid: string, evt: any): void {
   trace('batch_enqueue', { jid, batchSize: p.batch.length, prevState: p.state })
 
   if (p.state === 'CLAUDE_RUNNING') {
-    // claude is busy with the previous batch; this msg waits for the next round.
-    // No timer change — onClaudeExit will kick off COLLECTING when claude finishes.
+    writeStateSnapshot()
     return
   }
 
   if (p.state === 'PRE_REPLY') {
-    // User is still talking — cancel the pre-reply commit and go back to collecting.
     clearPendingTimer(p)
     trace('pre_reply_aborted_by_new_msg', { jid })
   } else if (p.state === 'COLLECTING') {
@@ -427,6 +439,7 @@ function enqueueMessage(jid: string, evt: any): void {
 
   p.state = 'COLLECTING'
   p.timer = setTimeout(() => closeCollectWindow(jid), tunables().collect_window_ms)
+  writeStateSnapshot()
 }
 
 function closeCollectWindow(jid: string): void {
@@ -450,7 +463,6 @@ async function triggerClaude(jid: string): Promise<void> {
 
   if (DRY_RUN) {
     trace('claude_trigger_DRY_RUN', { jid, batchSize: batchSnapshot.length, msg_ids: batchSnapshot.map((m: any) => m.ID) })
-    // Simulate claude taking 1s for state-machine testing.
     setTimeout(() => onClaudeExit(jid), 1_000)
     return
   }
@@ -461,8 +473,74 @@ async function triggerClaude(jid: string): Promise<void> {
     onClaudeExit(jid)
     return
   }
-  trace('claude_trigger', { jid, batchSize: batchSnapshot.length, promptLen: prompt.length })
-  spawnClaude(jid, prompt, () => onClaudeExit(jid))
+  // Per-turn snapshot — dashboard reads this for the "Production" view.
+  const turnId = `${new Date().toISOString().replace(/[:.]/g, '-')}_${jid.replace(/[^a-z0-9]/gi, '').slice(0, 16)}`
+  const turnDir = join(TURNS_DIR, turnId)
+  mkdirSync(turnDir, { recursive: true, mode: 0o700 })
+  writeFileSync(join(turnDir, 'prompt.txt'), prompt)
+  writeFileSync(join(turnDir, 'persona.txt'), PERSONA_PROMPT)
+  writeFileSync(join(turnDir, 'batch.json'), JSON.stringify({ jid, batchSize: batchSnapshot.length, messages: batchSnapshot, model: tunables().chat_model, started_at: new Date().toISOString() }, null, 2))
+
+  trace('claude_trigger', { jid, batchSize: batchSnapshot.length, promptLen: prompt.length, turnId })
+  const startMs = Date.now()
+  spawnClaudeWithTurn(jid, prompt, turnId, startMs, () => onClaudeExit(jid))
+}
+
+function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startMs: number, onExit: () => void): void {
+  const sess = getOrCreateSession(jid)
+  const sessFlag = sess.isNew ? ['--session-id', sess.uuid] : ['--resume', sess.uuid]
+  const args = [
+    '-p',
+    '--model', tunables().chat_model,
+    '--mcp-config', MCP_JSON,
+    '--dangerously-skip-permissions',
+    '--strict-mcp-config',
+    '--append-system-prompt', PERSONA_PROMPT,
+    ...sessFlag,
+    prompt,
+  ]
+  trace('claude_spawn', { jid, sessId: sess.uuid, sessNew: sess.isNew, model: tunables().chat_model, promptLen: prompt.length, turnId })
+
+  const heartbeat = startTyping(jid)
+  const child = spawn(CLAUDE_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+  let stdoutBuf = ''
+  let stderrBuf = ''
+  child.stdout.on('data', d => { stdoutBuf += d.toString() })
+  child.stderr.on('data', d => { stderrBuf += d.toString() })
+  child.on('exit', code => {
+    clearInterval(heartbeat)
+    stopTyping(jid)
+    const durationMs = Date.now() - startMs
+    // Write turn outcome snapshot
+    try {
+      writeFileSync(join(TURNS_DIR, turnId, 'stdout.txt'), stdoutBuf)
+      writeFileSync(join(TURNS_DIR, turnId, 'stderr.txt'), stderrBuf)
+      writeFileSync(join(TURNS_DIR, turnId, 'exit.json'), JSON.stringify({
+        jid, code, durationMs, ended_at: new Date().toISOString(),
+      }, null, 2))
+    } catch {}
+    trace('claude_exit', { jid, code, durationMs, stdoutTail: stdoutBuf.slice(-200), stderrTail: stderrBuf.slice(-300), turnId })
+    onExit()
+  })
+  child.on('error', err => {
+    clearInterval(heartbeat)
+    stopTyping(jid)
+    try { writeFileSync(join(TURNS_DIR, turnId, 'error.txt'), String(err)) } catch {}
+    trace('claude_error', { jid, err: String(err), turnId })
+    onExit()
+  })
+}
+
+// Lightweight live state snapshot for the dashboard. Written on every state
+// transition; dashboard reads + polls.
+function writeStateSnapshot(): void {
+  const out: Record<string, { state: string; batch: number; since: string }> = {}
+  const now = new Date().toISOString()
+  for (const [jid, p] of pending.entries()) {
+    if (p.state === 'IDLE' && p.batch.length === 0) continue
+    out[jid] = { state: p.state, batch: p.batch.length, since: now }
+  }
+  try { writeFileSync(STATE_SNAP, JSON.stringify(out, null, 2)) } catch {}
 }
 
 function onClaudeExit(jid: string): void {
@@ -470,12 +548,13 @@ function onClaudeExit(jid: string): void {
   if (p.batch.length === 0) {
     p.state = 'IDLE'
     trace('claude_done_idle', { jid })
+    writeStateSnapshot()
     return
   }
-  // Msgs arrived during claude's run — start a fresh COLLECT window for them.
   trace('claude_done_pending_batch', { jid, batchSize: p.batch.length })
   p.state = 'COLLECTING'
   p.timer = setTimeout(() => closeCollectWindow(jid), tunables().collect_window_ms)
+  writeStateSnapshot()
 }
 
 // Build a prompt that wraps every msg in the batch as a <whatsapp> tag, then
