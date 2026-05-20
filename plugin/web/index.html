@@ -150,17 +150,17 @@
           <!-- Create new bot -->
           <button @click="openWizard()"
                   class="bg-emerald-900/20 border-2 border-dashed border-emerald-700 rounded-xl p-6 hover:border-emerald-500 hover:bg-emerald-900/30 transition text-left">
-            <div class="text-3xl mb-2">➕</div>
+            <div class="text-2xl mb-2 text-emerald-400" x-html="icons.plus"></div>
             <div class="font-bold text-emerald-300">Create new bot</div>
-            <div class="text-xs text-zinc-400 mt-1">New folder → init files → scan WhatsApp QR → ready</div>
+            <div class="text-xs text-zinc-400 mt-1">From-zero chatbot: persona / playbooks / memory v2 / humanlike batching. Pick persona template, scan QR, ready in ~2 min.</div>
           </button>
 
           <!-- Link existing project -->
           <button @click="openLinkExisting()"
                   class="bg-blue-900/20 border-2 border-dashed border-blue-700 rounded-xl p-6 hover:border-blue-500 hover:bg-blue-900/30 transition text-left">
-            <div class="text-3xl mb-2">🔗</div>
+            <div class="text-2xl mb-2 text-blue-400" x-html="icons.link"></div>
             <div class="font-bold text-blue-300">Link existing project</div>
-            <div class="text-xs text-zinc-400 mt-1">Use an existing cwd. WA chat with "owner JID" shares session with your terminal claude.</div>
+            <div class="text-xs text-zinc-400 mt-1">Use an existing cwd as a <strong>terminal extension</strong> — WhatsApp as remote IO for your project's claude. Persona / playbooks / contact memory not used.</div>
           </button>
 
           <!-- Existing projects -->
@@ -168,13 +168,19 @@
             <button @click="select(p.id); activeTab = 'overview'"
                     class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 hover:border-emerald-600 hover:bg-zinc-800/50 text-left">
               <div class="flex items-start gap-3">
-                <div class="text-2xl shrink-0" x-text="p.routerAlive ? '🟢' : (p.paired ? '⚪' : '🟠')"></div>
+                <span :class="p.routerAlive ? 'text-emerald-400' : (p.paired ? 'text-zinc-500' : 'text-amber-400')"
+                      class="text-xl shrink-0" x-html="icons.dot"></span>
                 <div class="min-w-0 flex-1">
-                  <div class="font-bold truncate" x-text="p.name"></div>
+                  <div class="flex items-baseline gap-2">
+                    <span class="font-bold truncate" x-text="p.name"></span>
+                    <span :class="p.mode === 'terminal-extension' ? 'bg-blue-900/40 text-blue-300' : 'bg-emerald-900/40 text-emerald-300'"
+                          class="text-[10px] px-1.5 py-0.5 rounded font-mono uppercase tracking-wider"
+                          x-text="p.mode === 'terminal-extension' ? 'term-ext' : 'bot'"></span>
+                  </div>
                   <div class="text-xs text-zinc-500 font-mono truncate" x-text="p.account + ' · ' + p.path"></div>
                   <div class="mt-3 flex gap-3 text-xs text-zinc-400">
                     <span x-text="p.allowFrom.length + ' allowed'"></span>
-                    <span x-text="p.contactCount + ' contacts'"></span>
+                    <span x-show="p.mode !== 'terminal-extension'" x-text="p.contactCount + ' contacts'"></span>
                   </div>
                   <div class="mt-2 flex gap-1.5">
                     <span x-show="!p.paired" class="text-xs bg-amber-900/40 text-amber-300 px-2 py-0.5 rounded">needs pair</span>
@@ -198,13 +204,34 @@
       <section x-show="activeTab === 'overview' && selected" class="p-8 max-w-5xl mx-auto">
         <div class="flex items-start gap-4 mb-6">
           <div class="flex-1">
-            <h2 class="text-2xl font-bold mb-1" x-text="selected?.name"></h2>
+            <div class="flex items-center gap-3 mb-1">
+              <h2 class="text-2xl font-bold" x-text="selected?.name"></h2>
+              <span :class="selected?.mode === 'terminal-extension' ? 'bg-blue-900/40 text-blue-300 border-blue-700/40' : 'bg-emerald-900/40 text-emerald-300 border-emerald-700/40'"
+                    class="text-xs px-2 py-0.5 rounded border font-mono uppercase tracking-wide"
+                    x-text="selected?.mode === 'terminal-extension' ? 'terminal extension' : 'bot'"></span>
+            </div>
             <p class="text-zinc-500 text-sm font-mono" x-text="selected?.path"></p>
           </div>
           <button @click="openTerminal()"
                   class="text-xs px-3 py-1.5 rounded border border-zinc-700 hover:bg-zinc-800 flex items-center gap-2 shrink-0">
-            🖥 <span>Open Claude here</span>
+            <span x-html="icons.terminal"></span>
+            <span>Open Claude here</span>
           </button>
+        </div>
+
+        <!-- Terminal-extension explainer -->
+        <div x-show="selected?.mode === 'terminal-extension'" class="mb-6 bg-blue-900/10 border border-blue-700/30 rounded-xl p-4">
+          <div class="flex items-start gap-3">
+            <span class="text-blue-400 text-xl mt-0.5" x-html="icons.terminal"></span>
+            <div class="flex-1">
+              <p class="font-bold text-blue-300 mb-1">Terminal-extension mode</p>
+              <p class="text-xs text-zinc-400 leading-relaxed">
+                WhatsApp is a remote input/output for THIS project's claude session. Behavior is direct (no batching/typing/humanlike delay) and persona = your project's CLAUDE.md (not bot persona templates).
+                The Persona / Playbooks / per-contact-Memory tabs are unused in this mode.
+                You can convert to <strong>bot mode</strong> from Settings if you change your mind.
+              </p>
+            </div>
+          </div>
         </div>
 
         <!-- Unpaired warning -->
@@ -355,8 +382,21 @@
         </div>
       </section>
 
-      <!-- ─────── PERSONA ─────── -->
-      <section x-show="activeTab === 'persona' && selected" class="flex h-full">
+      <!-- ─────── PERSONA — terminal-extension banner ─────── -->
+      <section x-show="activeTab === 'persona' && selected && selected.mode === 'terminal-extension'" class="p-8 max-w-3xl mx-auto">
+        <h2 class="text-xl font-bold mb-3">Persona — managed by your project</h2>
+        <div class="bg-blue-900/10 border border-blue-700/30 rounded-xl p-5">
+          <p class="text-sm text-zinc-300 mb-3">
+            This is a <strong class="text-blue-300">terminal-extension</strong> project. Your project's own <code class="text-emerald-400">CLAUDE.md</code> / <code class="text-emerald-400">.claude/agents/</code> already define the agent's behavior — cc-whatsapp doesn't add its own persona layer here.
+          </p>
+          <p class="text-xs text-zinc-500">
+            Want a separate persona for this WhatsApp channel? Convert to <strong>bot mode</strong> from Settings → cc-whatsapp will then install its own IDENTITY/SOUL/STYLE/AGENTS/MEMORY templates (won't overwrite your existing project files).
+          </p>
+        </div>
+      </section>
+
+      <!-- ─────── PERSONA (bot mode) ─────── -->
+      <section x-show="activeTab === 'persona' && selected && selected.mode !== 'terminal-extension'" class="flex h-full">
         <aside class="w-56 border-r border-zinc-800 py-2 shrink-0">
           <div class="px-4 py-2 text-xs text-zinc-500 uppercase tracking-wider">Persona files</div>
           <template x-for="name in personaNames" :key="name">
@@ -399,6 +439,12 @@
           <p class="text-sm text-zinc-400">
             Every humanlike behavior parameter, exposed. Changes are <strong class="text-amber-400">staged</strong> — click <em>Save changes</em> at the bottom to apply. Router re-reads on every turn so live conversations pick up new values without restart.
           </p>
+          <div x-show="selected?.mode === 'terminal-extension'" class="mt-3 bg-blue-900/10 border border-blue-700/30 rounded-lg p-3 text-xs text-zinc-300 flex items-start gap-2">
+            <span class="text-blue-400 mt-0.5" x-html="icons.info"></span>
+            <div>
+              This project is <strong class="text-blue-300">terminal-extension mode</strong> — all humanlike behaviors default to <strong>disabled</strong> (zero delay, no batching, no typing indicator, single-segment reply). Sliders below are still functional; enable any individually if you want batching/delays here too.
+            </div>
+          </div>
         </div>
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 mb-6">
@@ -652,8 +698,21 @@
         </form>
       </section>
 
-      <!-- ─────── PLAYBOOKS ─────── -->
-      <section x-show="activeTab === 'playbooks' && selected" class="flex h-full">
+      <!-- ─────── PLAYBOOKS — terminal-extension banner ─────── -->
+      <section x-show="activeTab === 'playbooks' && selected && selected.mode === 'terminal-extension'" class="p-8 max-w-3xl mx-auto">
+        <h2 class="text-xl font-bold mb-3">Playbooks — not used in terminal-extension mode</h2>
+        <div class="bg-blue-900/10 border border-blue-700/30 rounded-xl p-5">
+          <p class="text-sm text-zinc-300 mb-3">
+            Playbooks are tag-driven interaction guides (new-stranger / friend / lead / ...) — useful when the bot talks to many people. In <strong class="text-blue-300">terminal-extension</strong> mode you're the only one messaging, so relationship classification doesn't apply.
+          </p>
+          <p class="text-xs text-zinc-500">
+            If you convert to bot mode (Settings), playbooks become available.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─────── PLAYBOOKS (bot mode) ─────── -->
+      <section x-show="activeTab === 'playbooks' && selected && selected.mode !== 'terminal-extension'" class="flex h-full">
         <aside class="w-64 border-r border-zinc-800 py-2 shrink-0">
           <div class="px-4 py-2 text-xs text-zinc-500 uppercase tracking-wider">Relationship playbooks</div>
           <template x-for="pb in playbooks" :key="pb.name">
@@ -704,6 +763,35 @@
             </div>
           </template>
         </dl>
+
+        <!-- Mode toggle -->
+        <h3 class="text-sm font-bold uppercase tracking-wider text-zinc-400 mb-3">Project mode</h3>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4 mb-6 space-y-3">
+          <p class="text-xs text-zinc-400 leading-relaxed">
+            <strong class="text-emerald-300">bot</strong>: full chatbot — humanlike batching/delays, persona templates, per-contact memory v2, playbooks. Use when bot talks to many people.<br><br>
+            <strong class="text-blue-300">terminal-extension</strong>: lean — WhatsApp is just an extra input channel for your project's claude. Direct replies, no batching, no persona templates. Use when YOU are the only one messaging.
+          </p>
+          <div class="flex gap-2">
+            <label :class="(selected?.mode || 'bot') === 'bot' ? 'border-emerald-500 bg-emerald-900/20' : 'border-zinc-700 hover:bg-zinc-800'"
+                   class="flex-1 border rounded-lg p-3 cursor-pointer">
+              <input type="radio" value="bot" :checked="(selected?.mode || 'bot') === 'bot'" @change="setMode('bot')" class="sr-only">
+              <div class="flex items-center gap-2">
+                <span x-html="icons.bot" class="text-emerald-400"></span>
+                <span class="font-bold text-sm">Bot mode</span>
+                <span x-show="(selected?.mode || 'bot') === 'bot'" class="ml-auto text-emerald-400" x-html="icons.check"></span>
+              </div>
+            </label>
+            <label :class="selected?.mode === 'terminal-extension' ? 'border-blue-500 bg-blue-900/20' : 'border-zinc-700 hover:bg-zinc-800'"
+                   class="flex-1 border rounded-lg p-3 cursor-pointer">
+              <input type="radio" value="terminal-extension" :checked="selected?.mode === 'terminal-extension'" @change="setMode('terminal-extension')" class="sr-only">
+              <div class="flex items-center gap-2">
+                <span x-html="icons.terminal" class="text-blue-400"></span>
+                <span class="font-bold text-sm">Terminal extension</span>
+                <span x-show="selected?.mode === 'terminal-extension'" class="ml-auto text-blue-400" x-html="icons.check"></span>
+              </div>
+            </label>
+          </div>
+        </div>
 
         <!-- Owner JID config -->
         <h3 class="text-sm font-bold uppercase tracking-wider text-blue-300 mb-3">Owner JID — share session with terminal</h3>

@@ -60,11 +60,23 @@ const MAX_PROMPT_CHARS = 8_000
 // ─── Per-project wacli account ───
 // Each project pairs its own WhatsApp number under wacli's multi-account
 // system. Account name is set by /cc-whatsapp:init wizard.
-function loadProjectConfig(): { account?: string; ownerJid?: string; port?: number; defaultProject?: string; bindings?: Record<string, string> } {
+function loadProjectConfig(): { account?: string; ownerJid?: string; port?: number; defaultProject?: string; bindings?: Record<string, string>; mode?: string } {
   try { return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) }
   catch { return {} }
 }
 const WACLI_ACCOUNT = loadProjectConfig().account ?? 'main'
+
+// Project mode — bot (full chatbot) vs terminal-extension (lean, owner-only).
+// Per-spawn lookup since dispatcher routes to different projects.
+function getProjectMode(stateDir: string): 'bot' | 'terminal-extension' {
+  try {
+    const cfg = JSON.parse(readFileSync(join(stateDir, 'config.json'), 'utf8'))
+    if (cfg.mode === 'terminal-extension') return 'terminal-extension'
+    if (cfg.mode === 'bot') return 'bot'
+  } catch {}
+  // Fallback by file presence (legacy projects without mode field)
+  return existsSync(join(stateDir, 'agent', 'IDENTITY.md')) ? 'bot' : 'terminal-extension'
+}
 
 // ─── Dispatcher: route by JID to target project ────────────────────────────
 // This (the "hub") project's config.json can carry routing info:
@@ -225,9 +237,12 @@ function loadAccess(): Required<Access> {
   } catch { return { allowFrom: [], disabled: false, mode: 'open' } }
 }
 
-// Atomically add a new sender + create contact memory v2 directory.
-// Idempotent. Writes to the TARGET project's stateDir (not necessarily our hub).
+// Atomically add a new sender + (bot mode only) create contact memory v2 dir.
+// Terminal-extension mode skips the memory v2 dir — the project's CLAUDE.md +
+// session JSONL is the memory; per-contact directories don't make sense for
+// owner-only use.
 function autoOnboardSender(targetStateDir: string, jid: string, pushName?: string): void {
+  const mode = getProjectMode(targetStateDir)
   const targetAccessFile = join(targetStateDir, 'access.json')
   // 1. add to allowFrom (target project's access.json)
   try {
@@ -243,7 +258,11 @@ function autoOnboardSender(targetStateDir: string, jid: string, pushName?: strin
     }
   } catch (err) { trace('auto_onboard_allowlist_err', { jid, err: String(err) }) }
 
-  // 2. create contacts/<jid>/{card.md, ...} (memory v2)
+  // 2. (bot mode only) create contacts/<jid>/{card.md, ...} (memory v2)
+  if (mode === 'terminal-extension') {
+    trace('contact_v2_skip_terminal_extension', { jid, mode })
+    return
+  }
   try {
     const contactDir = contactDirFor(targetStateDir, jid)
     const cardPath = contactCardPath(targetStateDir, jid)
@@ -793,23 +812,29 @@ async function buildBatchPrompt(jid: string, batch: any[], targetStateDir: strin
   }
   if (fragments.length === 0) return null
 
-  // Memory v2 paths
-  const contactDir = contactDirFor(targetStateDir, jid)
-  const cardPath = contactCardPath(targetStateDir, jid)
-  const cardExists = existsSync(cardPath)
-  const legacyPath = legacyContactPath(targetStateDir, jid)
-  const legacyExists = existsSync(legacyPath)
-
+  const mode = getProjectMode(targetStateDir)
   const trailer: string[] = []
-  if (cardExists) {
-    trailer.push(`Contact card: ${cardPath} (Read this FIRST — small summary + relationship_tag).`)
-    trailer.push(`Detail files (Read only if you need them this turn): ${join(contactDir, 'facts.md')}, ${join(contactDir, 'preferences.md')}, ${join(contactDir, 'voice.md')}, ${join(contactDir, 'timeline.md')}, ${join(contactDir, 'notes.md')}.`)
-    trailer.push(`Playbook: after reading card, Read agent/playbooks/<relationship_tag>.md for tag-specific guidance.`)
-    trailer.push(`After reply: Edit card.md if anything changed (last_contact, top_facts, open_threads, relationship_tag promotion). Append to notes.md for noteworthy observations.`)
-  } else if (legacyExists) {
-    trailer.push(`Contact file (legacy single-md format): ${legacyPath} — Read first.`)
+  if (mode === 'terminal-extension') {
+    // Lean trailer: this is the owner's remote terminal; CLAUDE.md + project files
+    // already define behavior. Skip memory v2 / playbook hints entirely.
+    trailer.push(`This message arrived via WhatsApp (terminal-extension mode for this project). Reply using the WhatsApp \`reply\` tool. The user is the project owner — treat this like a terminal request: short, direct, no bot-roleplay.`)
   } else {
-    trailer.push(`No contact memory yet for this JID — start a fresh one if the message is substantive.`)
+    // Bot mode: full memory v2 + playbook protocol
+    const contactDir = contactDirFor(targetStateDir, jid)
+    const cardPath = contactCardPath(targetStateDir, jid)
+    const cardExists = existsSync(cardPath)
+    const legacyPath = legacyContactPath(targetStateDir, jid)
+    const legacyExists = existsSync(legacyPath)
+    if (cardExists) {
+      trailer.push(`Contact card: ${cardPath} (Read this FIRST — small summary + relationship_tag).`)
+      trailer.push(`Detail files (Read only if you need them this turn): ${join(contactDir, 'facts.md')}, ${join(contactDir, 'preferences.md')}, ${join(contactDir, 'voice.md')}, ${join(contactDir, 'timeline.md')}, ${join(contactDir, 'notes.md')}.`)
+      trailer.push(`Playbook: after reading card, Read agent/playbooks/<relationship_tag>.md for tag-specific guidance.`)
+      trailer.push(`After reply: Edit card.md if anything changed (last_contact, top_facts, open_threads, relationship_tag promotion). Append to notes.md for noteworthy observations.`)
+    } else if (legacyExists) {
+      trailer.push(`Contact file (legacy single-md format): ${legacyPath} — Read first.`)
+    } else {
+      trailer.push(`No contact memory yet for this JID — start a fresh one if the message is substantive.`)
+    }
   }
   const t = tunables()
   const quotePct = Math.round(t.quote_reply_probability * 100)

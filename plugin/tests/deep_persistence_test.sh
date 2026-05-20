@@ -200,7 +200,7 @@ rm -rf "$HOME/Projects/deepprobe-target"
 rm -rf ~/.wacli/accounts/deepprobe-target
 
 # ── 13. link-existing (drops cc-whatsapp into existing dir without writing persona) ──
-hdr "13. POST /api/projects/link-existing (no overwrite)"
+hdr "13. POST /api/projects/link-existing (no overwrite + correct mode)"
 LINK_DIR=/tmp/link-existing-probe
 rm -rf "$LINK_DIR"; mkdir -p "$LINK_DIR/agent"
 echo "USER-CUSTOM-IDENTITY" > "$LINK_DIR/agent/IDENTITY.md"   # pre-existing file we MUST NOT overwrite
@@ -212,10 +212,33 @@ curl -sS -X POST "$DASH/api/projects/link-existing" \
 # Verify our pre-existing file is untouched
 ORIG=$(cat "$LINK_DIR/agent/IDENTITY.md")
 [ "$ORIG" = "USER-CUSTOM-IDENTITY" ] && ok "linkExisting did NOT overwrite user's pre-existing agent/IDENTITY.md" || fail "link no-overwrite" "got=[$ORIG]"
+# Verify mode field is terminal-extension
+LINK_MODE=$(python3 -c "import json; print(json.load(open('$LINK_DIR/.claude/cc-whatsapp/config.json')).get('mode',''))")
+[ "$LINK_MODE" = "terminal-extension" ] && ok "linkExisting wrote mode=terminal-extension" || fail "link mode" "got=[$LINK_MODE]"
+# Verify tunables are aggressive zero-delay
+LINK_CW=$(python3 -c "import json; print(json.load(open('$LINK_DIR/.claude/cc-whatsapp/tunables.json')).get('collect_window_ms', ''))")
+[ "$LINK_CW" = "0" ] && ok "linkExisting set collect_window_ms=0 (instant)" || fail "link tunables" "collect_window=[$LINK_CW]"
+LINK_TYP=$(python3 -c "import json; print(json.load(open('$LINK_DIR/.claude/cc-whatsapp/tunables.json')).get('enable_typing_indicator', ''))")
+[ "$LINK_TYP" = "False" ] && ok "linkExisting set enable_typing_indicator=false" || fail "link tunables typing" "got=[$LINK_TYP]"
 # Cleanup
 rm -rf "$LINK_DIR"
 /Users/mad-imac1/Projects/cc-whatsapp/bin/cc-whatsapp accounts remove linkprobe >/dev/null 2>&1
 rm -rf ~/.wacli/accounts/linkprobe
+
+# ── 14. mode toggle ──
+hdr "14. PUT /api/projects/:id/mode"
+curl -sS -X PUT "$DASH/api/projects/$PID/mode" \
+  -H 'Content-Type: application/json' -d '{"mode":"terminal-extension"}' >/dev/null
+DISK_MODE=$(python3 -c "import json; print(json.load(open('$PROBE_DIR/.claude/cc-whatsapp/config.json')).get('mode',''))")
+[ "$DISK_MODE" = "terminal-extension" ] && ok "mode toggle to terminal-extension persisted" || fail "mode toggle" "got=[$DISK_MODE]"
+curl -sS -X PUT "$DASH/api/projects/$PID/mode" \
+  -H 'Content-Type: application/json' -d '{"mode":"bot"}' >/dev/null
+DISK_MODE=$(python3 -c "import json; print(json.load(open('$PROBE_DIR/.claude/cc-whatsapp/config.json')).get('mode',''))")
+[ "$DISK_MODE" = "bot" ] && ok "mode toggle back to bot persisted" || fail "mode toggle back" "got=[$DISK_MODE]"
+# Verify invalid mode rejected
+INVALID=$(curl -sS -X PUT "$DASH/api/projects/$PID/mode" \
+  -H 'Content-Type: application/json' -d '{"mode":"garbage"}')
+echo "$INVALID" | grep -q '"ok":false' && ok "invalid mode rejected" || fail "invalid mode" "$INVALID"
 
 # ── Summary ──
 echo ""

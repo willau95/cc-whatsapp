@@ -66,6 +66,7 @@ type Project = {
   path: string
   name: string
   account: string
+  mode: 'bot' | 'terminal-extension'
   routerAlive: boolean
   routerPid?: number
   syncAlive: boolean
@@ -74,6 +75,7 @@ type Project = {
   disabled: boolean
   contactCount: number
   paired: boolean
+  ownerJid?: string
   health?: {
     connection_unstable: boolean
     disconnects_60s: number
@@ -102,11 +104,19 @@ function projectInfo(absPath: string): Project {
   } catch {}
   const account = cfg.account ?? 'main'
   const health = readJsonSafe(join(stateDir, 'health.json')) ?? undefined
+  // Mode auto-derivation for legacy projects without the field:
+  //   has agent/IDENTITY.md → 'bot' (it was created via createProject)
+  //   no persona files     → 'terminal-extension'
+  let mode: 'bot' | 'terminal-extension' = cfg.mode
+  if (!mode) {
+    mode = existsSync(join(stateDir, 'agent', 'IDENTITY.md')) ? 'bot' : 'terminal-extension'
+  }
   return {
     id: pathToId(absPath),
     path: absPath,
     name: absPath.split('/').filter(Boolean).pop() ?? absPath,
     account,
+    mode,
     routerAlive: isPidAlive(routerPid),
     routerPid,
     syncAlive: isPidAlive(syncPid),
@@ -115,6 +125,7 @@ function projectInfo(absPath: string): Project {
     disabled: !!access.disabled,
     contactCount,
     paired: isAccountPaired(account),
+    ownerJid: cfg.ownerJid,
     health,
   }
 }
@@ -631,10 +642,30 @@ function linkExistingProject(opts: { projectDir: string; account: string; ownerJ
 
   writeJsonAtomic(join(stateDir, 'config.json'), {
     account,
+    mode: 'terminal-extension',
     ...(opts.ownerJid ? { ownerJid: opts.ownerJid } : {}),
   })
-  writeJsonAtomic(join(stateDir, 'access.json'), { allowFrom: [], mode: 'open' })
+  // mode:'closed' = strict allowlist (owner-only is the point of terminal-extension).
+  // Owner JID is auto-added below if provided.
+  writeJsonAtomic(join(stateDir, 'access.json'), {
+    allowFrom: opts.ownerJid ? [opts.ownerJid] : [],
+    mode: 'closed',
+  })
   writeJsonAtomic(join(stateDir, 'sessions.json'), sessions)
+
+  // Terminal-extension defaults: all humanlike behaviors DISABLED.
+  // User wants instant, direct, single-message replies — like a real terminal.
+  // They can re-enable any of these from Tunables tab if needed.
+  writeJsonAtomic(join(stateDir, 'tunables.json'), {
+    collect_window_ms: 0,             // no batching — process each msg as it arrives
+    pre_reply_min_ms: 0,
+    pre_reply_max_ms: 1,              // no humanlike delay
+    inter_segment_min_ms: 0,
+    inter_segment_max_ms: 1,
+    quote_reply_probability: 0,       // single-user, no need to disambiguate
+    multi_msg_max_segments: 1,        // single block reply
+    enable_typing_indicator: false,   // no fake typing
+  })
 
   const id = pathToId(projectDir)
   generateRunCommand(id)
@@ -667,9 +698,10 @@ function createProject(opts: { parentDir: string; name: string; account: string;
   mkdirSync(agentDir, { recursive: true, mode: 0o700 })
   mkdirSync(contactsDir, { recursive: true, mode: 0o700 })
 
-  writeJsonAtomic(join(stateDir, 'config.json'), { account })
-  // mode:'open' = anyone can message + bot auto-onboards them (default).
-  // To restrict, switch to mode:'closed' from Access tab.
+  // mode='bot' (default) — full chatbot with personas, playbooks, humanlike batching.
+  // (linkExistingProject below uses mode='terminal-extension' for the alternate model.)
+  writeJsonAtomic(join(stateDir, 'config.json'), { account, mode: 'bot' })
+  // mode:'open' = anyone can message + bot auto-onboards them (default for bot mode).
   writeJsonAtomic(join(stateDir, 'access.json'), { allowFrom: [], mode: 'open' })
   writeJsonAtomic(join(stateDir, 'sessions.json'), {})
   writeJsonAtomic(join(stateDir, 'tunables.json'), {})
@@ -1355,6 +1387,18 @@ const server = (globalThis as any).Bun.serve({
       }
       if (sub === '/router/stop' && req.method === 'POST') {
         return json(stopRouter(id))
+      }
+
+      // MODE toggle (bot ↔ terminal-extension)
+      if (sub === '/mode' && req.method === 'PUT') {
+        const body = await req.json() as { mode: 'bot' | 'terminal-extension' }
+        if (body.mode !== 'bot' && body.mode !== 'terminal-extension') {
+          return json({ ok: false, err: 'mode must be bot or terminal-extension' }, 400)
+        }
+        const cfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
+        cfg.mode = body.mode
+        writeJsonAtomic(join(stateDir, 'config.json'), cfg)
+        return json({ ok: true, mode: cfg.mode })
       }
 
       // OPEN CLAUDE TERMINAL (project-level or conversation-level)

@@ -266,6 +266,19 @@ function app() {
       }
     },
 
+    // ─── project mode (bot ↔ terminal-extension) ───
+    async setMode(newMode) {
+      if (!confirm(`Switch project to "${newMode}" mode?\n\nbot: full chatbot (persona, memory v2, playbooks, humanlike delays)\nterminal-extension: lean, owner-only, direct replies\n\nThis changes default behavior but does NOT delete existing files.`)) return
+      const r = await fetch(`/api/projects/${this.selectedId}/mode`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: newMode }),
+      })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Mode switch failed: ' + (d.err ?? 'unknown'), 'error'); return }
+      this.flashToast(`Project mode → ${newMode}`)
+      await this.refresh()
+    },
+
     // ─── owner JID ───
     async loadOwnerJid() {
       if (!this.selectedId) { this.ownerJidSaved = ''; this.ownerJidDraft = ''; return }
