@@ -34,6 +34,7 @@ const REPO_ROOT = dirname(PLUGIN_ROOT)
 const WEB_ROOT = join(PLUGIN_ROOT, 'web')
 const TEMPLATES_PERSONAS = join(PLUGIN_ROOT, 'templates', 'personas')
 const TEMPLATES_AGENT = join(PLUGIN_ROOT, 'templates', 'agent')   // legacy default
+const TEMPLATES_PLAYBOOKS = join(PLUGIN_ROOT, 'templates', 'playbooks')
 const PORT = Number(process.env.CC_WHATSAPP_DASHBOARD_PORT ?? 38500)
 const CC_WHATSAPP_BIN = join(REPO_ROOT, 'bin', 'cc-whatsapp')
 
@@ -385,6 +386,153 @@ function tailTrace(id: string, lines = 100): string[] {
   } catch { return [] }
 }
 
+// ─── Playbooks (memory v2 — relationship-tag-driven interaction guides) ───
+function installPlaybooks(agentDir: string): void {
+  try {
+    const dst = join(agentDir, 'playbooks')
+    mkdirSync(dst, { recursive: true, mode: 0o700 })
+    if (!existsSync(TEMPLATES_PLAYBOOKS)) return
+    for (const f of readdirSync(TEMPLATES_PLAYBOOKS)) {
+      if (!f.endsWith('.md')) continue
+      const target = join(dst, f)
+      if (existsSync(target)) continue   // don't overwrite user customizations
+      copyFileSync(join(TEMPLATES_PLAYBOOKS, f), target)
+    }
+  } catch {}
+}
+
+function listPlaybooks(projectId: string): { name: string; content: string }[] {
+  const dir = join(getStateDir(projectId), 'agent', 'playbooks')
+  if (!existsSync(dir)) return []
+  return readdirSync(dir)
+    .filter(f => f.endsWith('.md'))
+    .map(f => ({ name: f.replace(/\.md$/, ''), content: (() => { try { return readFileSync(join(dir, f), 'utf8') } catch { return '' } })() }))
+}
+
+// ─── Memory v2 (per-contact directory) ─────────────────────────────────────
+const MEMORY_V2_SUBFILES = ['card', 'facts', 'preferences', 'voice', 'timeline', 'notes'] as const
+
+function readContactV2(projectId: string, jid: string): Record<string, string> {
+  const stateDir = getStateDir(projectId)
+  const dir = join(stateDir, 'agent', 'contacts', jid)
+  const out: Record<string, string> = {}
+  let usedLegacy = false
+  for (const sub of MEMORY_V2_SUBFILES) {
+    try { out[sub] = readFileSync(join(dir, `${sub}.md`), 'utf8') }
+    catch { out[sub] = '' }
+  }
+  // Legacy fallback: <jid>.md → goes into card field
+  if (!out.card) {
+    try { out.card = readFileSync(join(stateDir, 'agent', 'contacts', `${jid}.md`), 'utf8'); usedLegacy = true }
+    catch {}
+  }
+  return { ...out, _legacy: usedLegacy ? '1' : '' }
+}
+
+function writeContactV2Subfile(projectId: string, jid: string, sub: string, content: string): { ok: boolean; err?: string } {
+  if (!(MEMORY_V2_SUBFILES as readonly string[]).includes(sub)) {
+    return { ok: false, err: `invalid subfile: ${sub} (must be one of ${MEMORY_V2_SUBFILES.join(',')})` }
+  }
+  const stateDir = getStateDir(projectId)
+  const dir = join(stateDir, 'agent', 'contacts', jid)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  writeFileAtomic(join(dir, `${sub}.md`), content)
+  return { ok: true }
+}
+
+// ─── Dispatcher / Accounts ────────────────────────────────────────────────
+function readDispatcher(projectId: string): { defaultProject: string; bindings: Record<string, string> } {
+  const cfg = readJsonSafe(join(getStateDir(projectId), 'config.json')) ?? {}
+  return {
+    defaultProject: cfg.defaultProject ?? '',
+    bindings: cfg.bindings ?? {},
+  }
+}
+function writeDispatcher(projectId: string, dispatcher: { defaultProject?: string; bindings?: Record<string, string> }): void {
+  const cfgPath = join(getStateDir(projectId), 'config.json')
+  const cfg = readJsonSafe(cfgPath) ?? {}
+  if (dispatcher.defaultProject !== undefined) cfg.defaultProject = dispatcher.defaultProject || undefined
+  if (dispatcher.bindings !== undefined) cfg.bindings = dispatcher.bindings
+  writeJsonAtomic(cfgPath, cfg)
+}
+
+// Group all known projects by wacli account name
+function listAccounts(): Array<{ name: string; phone?: string; paired: boolean; storeDir?: string; projects: Project[]; hubProjectId?: string; routerAlive: boolean }> {
+  const projects = discoverProjects()
+  const byAccount = new Map<string, Project[]>()
+  for (const p of projects) {
+    if (!byAccount.has(p.account)) byAccount.set(p.account, [])
+    byAccount.get(p.account)!.push(p)
+  }
+
+  // Also discover wacli accounts that have no projects yet (paired but unbound)
+  let wacliAccts: any[] = []
+  try {
+    const r = Bun.spawnSync({ cmd: [CC_WHATSAPP_BIN, 'accounts', 'list', '--json'], stdout: 'pipe', stderr: 'pipe' })
+    const parsed = JSON.parse(new TextDecoder().decode(r.stdout))
+    wacliAccts = parsed?.data?.accounts ?? []
+  } catch {}
+
+  const all = new Set<string>()
+  for (const a of wacliAccts) all.add(a.name)
+  for (const k of byAccount.keys()) all.add(k)
+
+  const out: any[] = []
+  for (const acctName of all) {
+    const projs = byAccount.get(acctName) ?? []
+    const wcli = wacliAccts.find(a => a.name === acctName)
+    const phone = isAccountPaired(acctName) ? (wcli?.linked_jid ?? wcli?.phone ?? undefined) : undefined
+    // Hub = the project that owns the dispatcher (first one with bindings, else first one with router alive, else first)
+    const hub = projs.find(p => Object.keys(readDispatcher(p.id).bindings).length > 0)
+              ?? projs.find(p => p.routerAlive)
+              ?? projs[0]
+    out.push({
+      name: acctName,
+      phone,
+      paired: isAccountPaired(acctName),
+      storeDir: wcli?.store_dir,
+      projects: projs,
+      hubProjectId: hub?.id,
+      routerAlive: projs.some(p => p.routerAlive),
+    })
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+// Pull JIDs we've seen in trace.log recently but aren't bound yet (helps user
+// "detect-then-bind" without manually copying JIDs).
+function recentUnboundJids(projectId: string, limit = 50): Array<{ jid: string; firstSeen: string; lastSeen: string; sampleText: string; isGroup: boolean }> {
+  const trace = join(getStateDir(projectId), 'trace.log')
+  if (!existsSync(trace)) return []
+  let lines: string[]
+  try {
+    const content = readFileSync(trace, 'utf8')
+    lines = content.trimEnd().split('\n').slice(-2000)
+  } catch { return [] }
+  const seen = new Map<string, { firstSeen: string; lastSeen: string; sampleText: string; isGroup: boolean }>()
+  const dispatcher = readDispatcher(projectId)
+  const bound = new Set(Object.keys(dispatcher.bindings))
+  for (const line of lines) {
+    const m = line.match(/^(\S+)\s+webhook_received\s+(.+)$/)
+    if (!m) continue
+    try {
+      const evt = JSON.parse(m[2]!)
+      const jid = evt.chat
+      if (!jid || bound.has(jid)) continue
+      if (!seen.has(jid)) {
+        seen.set(jid, { firstSeen: m[1]!, lastSeen: m[1]!, sampleText: evt.text_preview ?? '', isGroup: jid.endsWith('@g.us') })
+      } else {
+        seen.get(jid)!.lastSeen = m[1]!
+        if (!seen.get(jid)!.sampleText && evt.text_preview) seen.get(jid)!.sampleText = evt.text_preview
+      }
+    } catch {}
+  }
+  return Array.from(seen.entries())
+    .map(([jid, info]) => ({ jid, ...info }))
+    .sort((a, b) => b.lastSeen.localeCompare(a.lastSeen))
+    .slice(0, limit)
+}
+
 // ─── Persona templates ─────────────────────────────────────────────────────
 
 const TEMPLATE_METADATA: Record<string, { label: string; description: string; icon: string }> = {
@@ -533,6 +681,9 @@ function createProject(opts: { parentDir: string; name: string; account: string;
       writeFileAtomic(join(agentDir, name), content)
     }
   }
+
+  // Install playbooks for memory-v2 relationship-tag-driven routing
+  installPlaybooks(agentDir)
 
   // Copy contact TEMPLATE.md
   try {
@@ -983,6 +1134,9 @@ const server = (globalThis as any).Bun.serve({
     if (p === '/api/projects' && req.method === 'GET') {
       return json(discoverProjects())
     }
+    if (p === '/api/accounts' && req.method === 'GET') {
+      return json(listAccounts())
+    }
     if (p === '/api/projects' && req.method === 'POST') {
       const body = await req.json() as any
       const result = createProject({
@@ -1207,6 +1361,84 @@ const server = (globalThis as any).Bun.serve({
       if (sub === '/open-terminal' && req.method === 'POST') {
         const body = await req.json().catch(() => ({})) as { jid?: string }
         return json(openClaudeTerminal(id, body.jid))
+      }
+
+      // ─── DISPATCHER (group-binding CRUD) ───
+      if (sub === '/dispatcher' && req.method === 'GET') {
+        return json(readDispatcher(id))
+      }
+      if (sub === '/dispatcher' && req.method === 'PUT') {
+        const body = await req.json() as { defaultProject?: string; bindings?: Record<string, string> }
+        writeDispatcher(id, body)
+        return json({ ok: true, dispatcher: readDispatcher(id) })
+      }
+      if (sub.match(/^\/dispatcher\/bindings$/) && req.method === 'POST') {
+        const body = await req.json() as { jid: string; targetProjectId: string }
+        const cfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
+        const bindings = cfg.bindings ?? {}
+        const targetProjectPath = idToPath(body.targetProjectId)
+        if (!existsSync(targetProjectPath)) return json({ ok: false, err: 'target project not found' }, 400)
+        bindings[body.jid] = targetProjectPath
+        cfg.bindings = bindings
+        writeJsonAtomic(join(stateDir, 'config.json'), cfg)
+        return json({ ok: true, bindings })
+      }
+      const bindingDelete = sub.match(/^\/dispatcher\/bindings\/(.+)$/)
+      if (bindingDelete && req.method === 'DELETE') {
+        const jid = decodeURIComponent(bindingDelete[1]!)
+        const cfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
+        const bindings = cfg.bindings ?? {}
+        delete bindings[jid]
+        cfg.bindings = bindings
+        writeJsonAtomic(join(stateDir, 'config.json'), cfg)
+        return json({ ok: true, bindings })
+      }
+      if (sub === '/dispatcher/default' && req.method === 'PUT') {
+        const body = await req.json() as { targetProjectId: string | null }
+        const cfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
+        if (body.targetProjectId) {
+          const targetPath = idToPath(body.targetProjectId)
+          if (!existsSync(targetPath)) return json({ ok: false, err: 'target project not found' }, 400)
+          cfg.defaultProject = targetPath
+        } else {
+          delete cfg.defaultProject
+        }
+        writeJsonAtomic(join(stateDir, 'config.json'), cfg)
+        return json({ ok: true, defaultProject: cfg.defaultProject ?? null })
+      }
+      if (sub === '/recent-jids' && req.method === 'GET') {
+        return json(recentUnboundJids(id))
+      }
+
+      // ─── MEMORY v2 (per-contact subfiles) ───
+      const contactV2Read = sub.match(/^\/contacts-v2\/([^/]+)$/)
+      if (contactV2Read && req.method === 'GET') {
+        const jid = decodeURIComponent(contactV2Read[1]!)
+        return json({ jid, ...readContactV2(id, jid) })
+      }
+      const contactV2Write = sub.match(/^\/contacts-v2\/([^/]+)\/([a-z]+)$/)
+      if (contactV2Write && req.method === 'PUT') {
+        const jid = decodeURIComponent(contactV2Write[1]!)
+        const subfile = contactV2Write[2]!
+        const body = await req.text()
+        const result = writeContactV2Subfile(id, jid, subfile, body)
+        return json(result, result.ok ? 200 : 400)
+      }
+
+      // ─── PLAYBOOKS ───
+      if (sub === '/playbooks' && req.method === 'GET') {
+        return json(listPlaybooks(id))
+      }
+      const pbWrite = sub.match(/^\/playbooks\/([a-z0-9_-]+)$/)
+      if (pbWrite && req.method === 'PUT') {
+        const name = pbWrite[1]!
+        const body = await req.text()
+        writeFileAtomic(join(stateDir, 'agent', 'playbooks', `${name}.md`), body)
+        return json({ ok: true })
+      }
+      if (sub === '/playbooks/install-defaults' && req.method === 'POST') {
+        installPlaybooks(join(stateDir, 'agent'))
+        return json({ ok: true, playbooks: listPlaybooks(id).map(p => p.name) })
       }
 
       // OWNER JID (the JID whose WA chat shares session UUID with terminal)

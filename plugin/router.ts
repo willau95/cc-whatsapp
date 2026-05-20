@@ -60,11 +60,56 @@ const MAX_PROMPT_CHARS = 8_000
 // ─── Per-project wacli account ───
 // Each project pairs its own WhatsApp number under wacli's multi-account
 // system. Account name is set by /cc-whatsapp:init wizard.
-function loadProjectConfig(): { account?: string; ownerJid?: string; port?: number } {
+function loadProjectConfig(): { account?: string; ownerJid?: string; port?: number; defaultProject?: string; bindings?: Record<string, string> } {
   try { return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) }
   catch { return {} }
 }
 const WACLI_ACCOUNT = loadProjectConfig().account ?? 'main'
+
+// ─── Dispatcher: route by JID to target project ────────────────────────────
+// This (the "hub") project's config.json can carry routing info:
+//   defaultProject: <abs-path>  — where DMs land (default: this project)
+//   bindings:                    — group JID → project path
+//     "120363xxx@g.us": "/Users/me/Projects/quant-trade"
+//     "120363yyy@g.us": "/Users/me/Projects/eva-chat"
+//
+// If no bindings/default specified, the hub IS the default project (legacy).
+function resolveTargetProject(jid: string): { stateDir: string; cwd: string; account: string } {
+  const cfg = loadProjectConfig()
+  const bindings = cfg.bindings ?? {}
+  const isGroup = jid.endsWith('@g.us')
+
+  // 1. Group JID → look in bindings
+  if (isGroup && bindings[jid]) {
+    const cwd = bindings[jid]!
+    return { stateDir: join(cwd, '.claude', 'cc-whatsapp'), cwd, account: WACLI_ACCOUNT }
+  }
+  // 2. DM (or unbound group) → default project (or hub itself)
+  if (cfg.defaultProject && cfg.defaultProject !== STATE_DIR.replace(/\.claude\/cc-whatsapp\/?$/, '').replace(/\/$/, '')) {
+    const cwd = cfg.defaultProject
+    return { stateDir: join(cwd, '.claude', 'cc-whatsapp'), cwd, account: WACLI_ACCOUNT }
+  }
+  // 3. No dispatcher configured → hub is target (legacy / single-project mode)
+  return { stateDir: STATE_DIR, cwd: STATE_DIR.replace(/\.claude\/cc-whatsapp\/?$/, '').replace(/\/$/, ''), account: WACLI_ACCOUNT }
+}
+
+// ─── Contact memory v2 ─────────────────────────────────────────────────────
+// Per-contact memory used to be ONE flat .md. Now it's a directory with a
+// small always-loaded card.md + on-demand subfiles. Backward-compatible: if
+// `<jid>.md` already exists (old format), we keep it AND create card.md
+// alongside on first touch.
+function contactDirFor(stateDir: string, jid: string): string {
+  return join(stateDir, 'agent', 'contacts', jid)
+}
+function contactCardPath(stateDir: string, jid: string): string {
+  return join(contactDirFor(stateDir, jid), 'card.md')
+}
+function legacyContactPath(stateDir: string, jid: string): string {
+  return join(stateDir, 'agent', 'contacts', `${jid}.md`)
+}
+function contactExists(stateDir: string, jid: string): boolean {
+  return existsSync(contactCardPath(stateDir, jid)) || existsSync(legacyContactPath(stateDir, jid))
+}
 
 // Track our own spawned claude PIDs so we can distinguish from external
 // `claude --resume <uuid>` processes (i.e., user running claude in a terminal
@@ -180,40 +225,67 @@ function loadAccess(): Required<Access> {
   } catch { return { allowFrom: [], disabled: false, mode: 'open' } }
 }
 
-// Atomically add a new sender to allowFrom + create a contact memory file
-// from TEMPLATE.md (substituting JID + PushName + date). Idempotent.
-function autoOnboardSender(jid: string, pushName?: string): void {
-  // 1. add to allowFrom
+// Atomically add a new sender + create contact memory v2 directory.
+// Idempotent. Writes to the TARGET project's stateDir (not necessarily our hub).
+function autoOnboardSender(targetStateDir: string, jid: string, pushName?: string): void {
+  const targetAccessFile = join(targetStateDir, 'access.json')
+  // 1. add to allowFrom (target project's access.json)
   try {
-    const access = loadAccess()
+    let access: any = { allowFrom: [], mode: 'open' }
+    try { access = JSON.parse(readFileSync(targetAccessFile, 'utf8')) } catch {}
+    if (!access.allowFrom) access.allowFrom = []
     if (!access.allowFrom.includes(jid)) {
       access.allowFrom.push(jid)
-      const tmp = ACCESS_FILE + '.tmp'
+      const tmp = targetAccessFile + '.tmp'
+      mkdirSync(dirname(targetAccessFile), { recursive: true, mode: 0o700 })
       writeFileSync(tmp, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 })
-      renameSync(tmp, ACCESS_FILE)
+      renameSync(tmp, targetAccessFile)
     }
-  } catch (err) { trace('auto_onboard_allowlist_err', String(err)) }
+  } catch (err) { trace('auto_onboard_allowlist_err', { jid, err: String(err) }) }
 
-  // 2. create contacts/<jid>.md from TEMPLATE.md (skip if file exists)
+  // 2. create contacts/<jid>/{card.md, ...} (memory v2)
   try {
-    const contactPath = join(CONTACTS_DIR, `${jid}.md`)
-    if (existsSync(contactPath)) return
-    const tplPath = join(CONTACTS_DIR, 'TEMPLATE.md')
+    const contactDir = contactDirFor(targetStateDir, jid)
+    const cardPath = contactCardPath(targetStateDir, jid)
+    if (existsSync(cardPath)) return  // already onboarded
+    mkdirSync(contactDir, { recursive: true, mode: 0o700 })
+    mkdirSync(join(contactDir, 'conversation'), { recursive: true, mode: 0o700 })
+
     const today = new Date().toISOString().slice(0, 10)
-    let content: string
-    if (existsSync(tplPath)) {
-      content = readFileSync(tplPath, 'utf8')
-        .replace(/<JID>/g, jid)
-        .replace(/YYYY-MM-DD/g, today)
-      // Prepend an auto-created banner so the bot knows what is template-text vs filled-in
-      content = `<!-- auto-created ${new Date().toISOString()} from first inbound message (PushName: ${pushName ?? '?'}) — replace the placeholder fields below as you learn -->\n\n` + content
-    } else {
-      content = `# ${jid}\n\n- WhatsApp PushName: ${pushName ?? '?'}\n- First contact: ${today}\n\n## Background\n*(fill in as you learn)*\n\n## Notes\n*(append observations + things to remember)*\n`
-    }
-    mkdirSync(CONTACTS_DIR, { recursive: true, mode: 0o700 })
-    writeFileSync(contactPath, content, { mode: 0o600 })
-    trace('contact_auto_created', { jid, pushName, path: contactPath })
-  } catch (err) { trace('auto_onboard_contact_err', String(err)) }
+    const card = `---
+jid: ${jid}
+push_name: ${pushName ?? '?'}
+relationship_tag: new-stranger
+language: ?
+first_contact: ${today}
+last_contact: ${today}
+---
+
+## Top facts (≤ 3 bullets, always loaded — keep tight)
+- *(first interaction — fill in as you learn)*
+
+## Open threads (things to follow up)
+- *(none yet)*
+
+## Last interaction summary
+*(empty — auto-update after each turn)*
+
+## Deep links (Read on demand)
+- Background → facts.md
+- Speaking style → voice.md
+- Likes/avoids → preferences.md
+- Full timeline → timeline.md
+- Recent dialogue → conversation/${today.slice(0,7)}.md
+`
+    writeFileSync(cardPath, card, { mode: 0o600 })
+    writeFileSync(join(contactDir, 'facts.md'), `# Facts — ${jid}\n\n*(fill in biographical, professional, family, location as you learn)*\n`, { mode: 0o600 })
+    writeFileSync(join(contactDir, 'preferences.md'), `# Preferences — ${jid}\n\n## Likes\n\n## Avoid\n\n## Observed reactions\n`, { mode: 0o600 })
+    writeFileSync(join(contactDir, 'voice.md'), `# Voice — ${jid}\n\n*(how they write: length, slang, emoji habits, formality)*\n`, { mode: 0o600 })
+    writeFileSync(join(contactDir, 'timeline.md'), `# Timeline — ${jid}\n\n## ${today}\nFirst contact.\n`, { mode: 0o600 })
+    writeFileSync(join(contactDir, 'notes.md'), `# Notes — ${jid}\n\n*(append-only stream of observations)*\n`, { mode: 0o600 })
+
+    trace('contact_auto_created_v2', { jid, pushName, dir: contactDir })
+  } catch (err) { trace('auto_onboard_contact_err', { jid, err: String(err) }) }
 }
 
 type Sessions = Record<string, string>  // jid → claude session UUID
@@ -559,27 +631,34 @@ async function triggerClaude(jid: string): Promise<void> {
     return
   }
 
-  const prompt = await buildBatchPrompt(jid, batchSnapshot)
+  // Resolve target project from the batch's first message tagged earlier.
+  const target = (batchSnapshot[0] as any).__target ?? resolveTargetProject(jid)
+
+  const prompt = await buildBatchPrompt(jid, batchSnapshot, target.stateDir)
   if (!prompt) {
     trace('batch_unmapped', { jid })
     onClaudeExit(jid)
     return
   }
-  // Per-turn snapshot — dashboard reads this for the "Production" view.
+  // Per-turn snapshot — write into TARGET project's turns/, not hub's.
+  const targetTurnsDir = join(target.stateDir, 'turns')
   const turnId = `${new Date().toISOString().replace(/[:.]/g, '-')}_${jid.replace(/[^a-z0-9]/gi, '').slice(0, 16)}`
-  const turnDir = join(TURNS_DIR, turnId)
+  const turnDir = join(targetTurnsDir, turnId)
   mkdirSync(turnDir, { recursive: true, mode: 0o700 })
+  // Reload persona from TARGET project's agent/*.md (NOT hub's)
+  const targetPersona = loadPersonaFor(target.stateDir)
   writeFileSync(join(turnDir, 'prompt.txt'), prompt)
-  writeFileSync(join(turnDir, 'persona.txt'), PERSONA_PROMPT)
-  writeFileSync(join(turnDir, 'batch.json'), JSON.stringify({ jid, batchSize: batchSnapshot.length, messages: batchSnapshot, model: tunables().chat_model, started_at: new Date().toISOString() }, null, 2))
+  writeFileSync(join(turnDir, 'persona.txt'), targetPersona)
+  writeFileSync(join(turnDir, 'batch.json'), JSON.stringify({ jid, project: target.cwd, batchSize: batchSnapshot.length, messages: batchSnapshot, model: tunables().chat_model, started_at: new Date().toISOString() }, null, 2))
 
-  trace('claude_trigger', { jid, batchSize: batchSnapshot.length, promptLen: prompt.length, turnId })
+  trace('claude_trigger', { jid, project: target.cwd, batchSize: batchSnapshot.length, promptLen: prompt.length, turnId })
   const startMs = Date.now()
-  spawnClaudeWithTurn(jid, prompt, turnId, startMs, () => onClaudeExit(jid))
+  spawnClaudeWithTurn(jid, prompt, turnId, startMs, target, targetPersona, targetTurnsDir, () => onClaudeExit(jid))
 }
 
-function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startMs: number, onExit: () => void): void {
-  const sess = getOrCreateSession(jid)
+function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startMs: number, target: { stateDir: string; cwd: string; account: string }, targetPersona: string, targetTurnsDir: string, onExit: () => void): void {
+  // Session lookup against TARGET project's sessions.json (not hub's)
+  const sess = getOrCreateSessionFor(target.stateDir, jid)
   const sessFlag = sess.isNew ? ['--session-id', sess.uuid] : ['--resume', sess.uuid]
   const t = tunables()
   const toolFlags: string[] = []
@@ -588,18 +667,27 @@ function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startM
   const args = [
     '-p',
     '--model', t.chat_model,
-    '--mcp-config', buildMcpJson(),
+    '--mcp-config', buildMcpJsonFor(target.stateDir),
     '--dangerously-skip-permissions',
     '--strict-mcp-config',
-    '--append-system-prompt', PERSONA_PROMPT,
+    '--append-system-prompt', targetPersona,
     ...toolFlags,
     ...sessFlag,
     prompt,
   ]
-  trace('claude_spawn', { jid, sessId: sess.uuid, sessNew: sess.isNew, model: t.chat_model, promptLen: prompt.length, turnId, toolFlags })
+  trace('claude_spawn', { jid, project: target.cwd, sessId: sess.uuid, sessNew: sess.isNew, model: t.chat_model, promptLen: prompt.length, turnId, toolFlags })
 
   const heartbeat = startTyping(jid)
-  const child = spawn(CLAUDE_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+  // Spawn with TARGET project's cwd + per-spawn ALLOWED_JIDS for hard-isolation
+  const child = spawn(CLAUDE_BIN, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: target.cwd,
+    env: {
+      ...process.env,
+      CC_WHATSAPP_PROJECT_DIR: target.stateDir,
+      CC_WHATSAPP_ALLOWED_JIDS: jid,   // hard isolation: claude can only reply to this JID
+    },
+  })
   if (child.pid) ourClaudePids.add(child.pid)
   let stdoutBuf = ''
   let stderrBuf = ''
@@ -610,11 +698,10 @@ function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startM
     clearInterval(heartbeat)
     stopTyping(jid)
     const durationMs = Date.now() - startMs
-    // Write turn outcome snapshot
     try {
-      writeFileSync(join(TURNS_DIR, turnId, 'stdout.txt'), stdoutBuf)
-      writeFileSync(join(TURNS_DIR, turnId, 'stderr.txt'), stderrBuf)
-      writeFileSync(join(TURNS_DIR, turnId, 'exit.json'), JSON.stringify({
+      writeFileSync(join(targetTurnsDir, turnId, 'stdout.txt'), stdoutBuf)
+      writeFileSync(join(targetTurnsDir, turnId, 'stderr.txt'), stderrBuf)
+      writeFileSync(join(targetTurnsDir, turnId, 'exit.json'), JSON.stringify({
         jid, code, durationMs, ended_at: new Date().toISOString(),
       }, null, 2))
     } catch {}
@@ -624,10 +711,47 @@ function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startM
   child.on('error', err => {
     clearInterval(heartbeat)
     stopTyping(jid)
-    try { writeFileSync(join(TURNS_DIR, turnId, 'error.txt'), String(err)) } catch {}
+    try { writeFileSync(join(targetTurnsDir, turnId, 'error.txt'), String(err)) } catch {}
     trace('claude_error', { jid, err: String(err), turnId })
     onExit()
   })
+}
+
+// Per-target helpers (memory v2 + dispatcher made them necessary)
+function loadPersonaFor(stateDir: string): string {
+  const parts: string[] = []
+  for (const name of ['IDENTITY', 'SOUL', 'STYLE', 'AGENTS', 'MEMORY']) {
+    const path = join(stateDir, 'agent', `${name}.md`)
+    try { parts.push(`════════════════════════════════════════\n${name}.md (${path})\n════════════════════════════════════════\n${readFileSync(path, 'utf8').trim()}`) } catch {}
+  }
+  return parts.join('\n\n')
+}
+
+function getOrCreateSessionFor(stateDir: string, jid: string): { uuid: string; isNew: boolean } {
+  const sessFile = join(stateDir, 'sessions.json')
+  let s: Sessions = {}
+  try { s = JSON.parse(readFileSync(sessFile, 'utf8')) as Sessions } catch {}
+  if (s[jid]) return { uuid: s[jid]!, isNew: false }
+  const uuid = randomUUID()
+  s[jid] = uuid
+  const tmp = sessFile + '.tmp'
+  mkdirSync(dirname(sessFile), { recursive: true, mode: 0o700 })
+  writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n', { mode: 0o600 })
+  renameSync(tmp, sessFile)
+  return { uuid, isNew: true }
+}
+
+function buildMcpJsonFor(stateDir: string): string {
+  const base: Record<string, any> = {
+    whatsapp: { command: 'bun', args: [SERVER_FILE] },
+  }
+  let extras: Record<string, any> = {}
+  try {
+    const obj = JSON.parse(readFileSync(join(stateDir, 'extra_mcps.json'), 'utf8'))
+    if (obj && obj.mcpServers && typeof obj.mcpServers === 'object') extras = obj.mcpServers
+  } catch {}
+  const { whatsapp: _ignore, ...userExtras } = extras
+  return JSON.stringify({ mcpServers: { ...base, ...userExtras } })
 }
 
 // Lightweight live state snapshot for the dashboard. Written on every state
@@ -659,22 +783,34 @@ function onClaudeExit(jid: string): void {
 // Build a prompt that wraps every msg in the batch as a <whatsapp> tag, then
 // appends one batch-level instruction block (contact memory + multi-msg
 // guidance + quote-reply guidance).
-async function buildBatchPrompt(jid: string, batch: any[]): Promise<string | null> {
+async function buildBatchPrompt(jid: string, batch: any[], targetStateDir: string = STATE_DIR): Promise<string | null> {
   const fragments: string[] = []
   for (const evt of batch) {
     const mapped = await buildPrompt(evt)
     if (!mapped) continue
-    // Keep only the <whatsapp ...>…</whatsapp> block (strip per-msg trailing hints).
     const m = mapped.prompt.match(/<whatsapp [^>]*>[\s\S]*?<\/whatsapp>/)
     if (m) fragments.push(m[0])
   }
   if (fragments.length === 0) return null
 
-  const contactFile = join(CONTACTS_DIR, `${jid}.md`)
-  const contactExists = existsSync(contactFile)
+  // Memory v2 paths
+  const contactDir = contactDirFor(targetStateDir, jid)
+  const cardPath = contactCardPath(targetStateDir, jid)
+  const cardExists = existsSync(cardPath)
+  const legacyPath = legacyContactPath(targetStateDir, jid)
+  const legacyExists = existsSync(legacyPath)
 
   const trailer: string[] = []
-  trailer.push(`Contact file: ${contactFile} (${contactExists ? 'exists — Read it first to recall who this is' : 'does NOT exist yet — copy TEMPLATE.md to this path and fill in basic info from PushName + any context you learn'})`)
+  if (cardExists) {
+    trailer.push(`Contact card: ${cardPath} (Read this FIRST — small summary + relationship_tag).`)
+    trailer.push(`Detail files (Read only if you need them this turn): ${join(contactDir, 'facts.md')}, ${join(contactDir, 'preferences.md')}, ${join(contactDir, 'voice.md')}, ${join(contactDir, 'timeline.md')}, ${join(contactDir, 'notes.md')}.`)
+    trailer.push(`Playbook: after reading card, Read agent/playbooks/<relationship_tag>.md for tag-specific guidance.`)
+    trailer.push(`After reply: Edit card.md if anything changed (last_contact, top_facts, open_threads, relationship_tag promotion). Append to notes.md for noteworthy observations.`)
+  } else if (legacyExists) {
+    trailer.push(`Contact file (legacy single-md format): ${legacyPath} — Read first.`)
+  } else {
+    trailer.push(`No contact memory yet for this JID — start a fresh one if the message is substantive.`)
+  }
   const t = tunables()
   const quotePct = Math.round(t.quote_reply_probability * 100)
   const maxSeg = t.multi_msg_max_segments
@@ -729,26 +865,32 @@ const server = (globalThis as any).Bun.serve({
         trace('webhook_raw_body', body.slice(0, 2000))
       }
 
-      const access = loadAccess()
-      if (access.disabled) { trace('drop_disabled'); return new Response('ok') }
+      // ── DISPATCHER: figure out target project for this JID ─────────
+      const target = resolveTargetProject(evt.Chat)
+      const targetAccessFile = join(target.stateDir, 'access.json')
+      let targetAccess: any = { allowFrom: [], mode: 'open' }
+      try { targetAccess = JSON.parse(readFileSync(targetAccessFile, 'utf8')) } catch {}
+
+      if (targetAccess.disabled) { trace('drop_disabled', { jid: evt.Chat, project: target.cwd }); return new Response('ok') }
       if (evt.FromMe === true || evt.Revoked === true) {
         trace('drop_from_me_or_revoked', { jid: evt.Chat })
         return new Response('ok')
       }
       // open mode (default) = auto-accept anyone + create contact memory
-      // closed mode = strict allowlist (original behavior)
-      if (!access.allowFrom.includes(evt.Chat)) {
-        if (access.mode === 'closed') {
-          trace('drop_not_allowlisted', { jid: evt.Chat })
+      // closed mode = strict allowlist
+      if (!(targetAccess.allowFrom ?? []).includes(evt.Chat)) {
+        if (targetAccess.mode === 'closed') {
+          trace('drop_not_allowlisted', { jid: evt.Chat, project: target.cwd })
           return new Response('ok')
         }
-        // mode === 'open' → auto-onboard
-        autoOnboardSender(evt.Chat, evt.PushName)
-        trace('auto_onboarded', { jid: evt.Chat, pushName: evt.PushName })
+        autoOnboardSender(target.stateDir, evt.Chat, evt.PushName)
+        trace('auto_onboarded', { jid: evt.Chat, pushName: evt.PushName, project: target.cwd })
       }
 
-      // Hand off to the batching state machine. It will collect more msgs,
-      // wait the pre-reply delay, then spawn claude with the whole batch.
+      // Hand off to the batching state machine, tagged with target project.
+      // Each JID's batch is processed against ONE target — bindings don't
+      // change mid-conversation.
+      ;(evt as any).__target = target
       enqueueMessage(evt.Chat, evt)
     } catch (err) {
       trace('webhook_handler_error', String(err))

@@ -10,6 +10,7 @@
       theme: { extend: { colors: { brand: { 500: '#10b981', 600: '#059669' } } } }
     }
   </script>
+  <script src="/assets/icons.js"></script>
   <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <!-- QR is rendered server-side (Bun + qrcode npm) and shipped as PNG dataURL via SSE.
        No client-side CDN dependency needed. -->
@@ -20,10 +21,10 @@
 
 <!-- ──────────────────── TOP BAR ──────────────────── -->
 <header class="border-b border-zinc-800 px-6 py-3 flex items-center gap-4 sticky top-0 bg-zinc-950 z-30">
-  <div class="flex items-center gap-2">
-    <span class="text-2xl">🌙</span>
-    <span class="font-mono text-sm tracking-tight">cc-whatsapp</span>
-    <span class="text-xs text-zinc-500">· v0.1.0</span>
+  <div class="flex items-center gap-2 text-emerald-400 text-xl">
+    <span x-html="icons.logo"></span>
+    <span class="font-mono text-sm tracking-tight text-zinc-100">cc-whatsapp</span>
+    <span class="text-xs text-zinc-500">· v0.2.0</span>
   </div>
 
   <!-- Project switcher (only when multiple projects) -->
@@ -43,12 +44,12 @@
 
   <div class="flex-1"></div>
 
-  <button @click="refresh()" class="text-xs px-3 py-1.5 rounded border border-zinc-700 hover:bg-zinc-800">↻ Refresh</button>
+  <button @click="refresh()" class="text-xs px-3 py-1.5 rounded border border-zinc-700 hover:bg-zinc-800 flex items-center gap-1.5"><span x-html="icons.refresh" class="text-sm"></span>Refresh</button>
 
   <button x-show="selected && selected.paired && !selected.routerAlive" @click="startRouter()"
-          class="text-xs px-3 py-1.5 rounded bg-brand-600 hover:bg-brand-500 text-white">▶ Start router</button>
+          class="text-xs px-3 py-1.5 rounded bg-brand-600 hover:bg-brand-500 text-white flex items-center gap-1.5"><span x-html="icons.play" class="text-sm"></span>Start router</button>
   <button x-show="selected && selected.routerAlive" @click="stopRouter()"
-          class="text-xs px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-white">■ Stop</button>
+          class="text-xs px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-white flex items-center gap-1.5"><span x-html="icons.stop" class="text-sm"></span>Stop</button>
 </header>
 
 <!-- ──────────────────── MAIN LAYOUT ──────────────────── -->
@@ -64,9 +65,9 @@
                 (t.needsProject && !selected) ? 'opacity-40 cursor-not-allowed' : ''
               ]"
               class="w-full px-4 py-2.5 text-left text-sm flex items-center gap-3">
-        <span class="text-lg" x-text="t.icon"></span>
+        <span class="text-base" x-html="icons[t.icon] || icons.document"></span>
         <span x-text="t.label"></span>
-        <span x-show="isTabDirty(t.id)" class="ml-auto text-xs text-amber-400">●</span>
+        <span x-show="isTabDirty(t.id)" class="ml-auto" x-html="icons.dot" :class="'text-amber-400'"></span>
       </button>
     </template>
   </nav>
@@ -75,6 +76,68 @@
   <main class="flex-1 flex flex-col overflow-hidden">
 
     <div class="flex-1 overflow-y-auto">
+
+      <!-- ─────── ACCOUNTS (top-level landing) ─────── -->
+      <section x-show="activeTab === 'accounts'" class="p-8 max-w-6xl mx-auto">
+        <div class="flex items-start gap-4 mb-6">
+          <div class="flex-1">
+            <h2 class="text-2xl font-bold mb-1">WhatsApp accounts</h2>
+            <p class="text-sm text-zinc-400">
+              One WhatsApp number = one account. Each account hosts one or more projects (a default for DMs + group-bound projects). One QR scan per account.
+            </p>
+          </div>
+        </div>
+
+        <div class="space-y-4">
+          <template x-if="accounts.length === 0">
+            <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-sm text-zinc-400">
+              No accounts yet. Go to <button @click="activeTab = 'projects'" class="underline text-emerald-400">Projects</button> and click <strong>Create new bot</strong> to pair your first WhatsApp number.
+            </div>
+          </template>
+          <template x-for="acct in accounts" :key="acct.name">
+            <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+              <header class="px-5 py-4 border-b border-zinc-800 flex items-center gap-3">
+                <span class="text-2xl text-emerald-400" x-html="icons.phone"></span>
+                <div class="flex-1 min-w-0">
+                  <div class="font-bold font-mono" x-text="acct.name"></div>
+                  <div class="text-xs text-zinc-500" x-text="acct.phone || (acct.paired ? 'paired (no phone#)' : 'NOT paired')"></div>
+                </div>
+                <span :class="acct.paired && acct.routerAlive ? 'text-emerald-400' : (acct.paired ? 'text-zinc-500' : 'text-amber-400')" class="text-xs flex items-center gap-1.5">
+                  <span x-html="icons.dot"></span>
+                  <span x-text="acct.paired ? (acct.routerAlive ? 'live' : 'stopped') : 'needs pair'"></span>
+                </span>
+              </header>
+
+              <div class="px-5 py-4 space-y-3">
+                <div class="text-xs uppercase tracking-wider text-zinc-500">Projects on this account</div>
+                <template x-if="acct.projects.length === 0">
+                  <div class="text-sm text-zinc-500">No projects bound yet.</div>
+                </template>
+                <template x-for="p in acct.projects" :key="p.id">
+                  <div class="flex items-center gap-3 py-2 border-b border-zinc-800 last:border-0">
+                    <span x-html="icons.folder" class="text-zinc-400"></span>
+                    <button @click="select(p.id); activeTab = 'overview'" class="flex-1 text-left text-sm hover:text-emerald-400">
+                      <span class="font-medium" x-text="p.name"></span>
+                      <span class="text-xs text-zinc-500 ml-2" x-text="p.id === acct.hubProjectId ? '(hub · holds dispatcher)' : ''"></span>
+                      <div class="text-xs text-zinc-600 font-mono truncate" x-text="p.path"></div>
+                    </button>
+                    <span x-show="p.routerAlive" class="text-xs text-emerald-400">live</span>
+                  </div>
+                </template>
+
+                <div class="mt-3 pt-3 border-t border-zinc-800">
+                  <button x-show="acct.hubProjectId"
+                          @click="select(acct.hubProjectId); activeTab = 'settings'"
+                          class="text-xs px-3 py-1.5 rounded border border-emerald-700 text-emerald-300 hover:bg-emerald-900/30 flex items-center gap-1.5">
+                    <span x-html="icons.settings"></span>
+                    Manage bindings on hub
+                  </button>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </section>
 
       <!-- ─────── PROJECTS (landing — always available) ─────── -->
       <section x-show="activeTab === 'projects'" class="p-8 max-w-6xl mx-auto">
@@ -589,6 +652,45 @@
         </form>
       </section>
 
+      <!-- ─────── PLAYBOOKS ─────── -->
+      <section x-show="activeTab === 'playbooks' && selected" class="flex h-full">
+        <aside class="w-64 border-r border-zinc-800 py-2 shrink-0">
+          <div class="px-4 py-2 text-xs text-zinc-500 uppercase tracking-wider">Relationship playbooks</div>
+          <template x-for="pb in playbooks" :key="pb.name">
+            <button @click="switchPlaybook(pb.name)"
+                    :class="activePlaybook === pb.name ? 'bg-zinc-800 text-emerald-400' : 'hover:bg-zinc-900'"
+                    class="w-full text-left px-4 py-2 text-sm font-mono flex items-center gap-2">
+              <span x-text="pb.name"></span>
+              <span x-show="activePlaybook === pb.name && playbookDirty" x-html="icons.dot" class="text-amber-400 ml-auto"></span>
+            </button>
+          </template>
+          <div class="px-4 py-3 mt-2 border-t border-zinc-800 space-y-2">
+            <p class="text-xs text-zinc-500 leading-relaxed">
+              Tag-driven interaction guides (e.g., new-stranger, friend, lead). Each contact's <code>card.md</code> has a <code>relationship_tag</code>; agent reads the matching playbook on each turn.
+            </p>
+            <button @click="installDefaultPlaybooks()" class="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1.5">
+              <span x-html="icons.refresh"></span>
+              Install default playbooks
+            </button>
+          </div>
+        </aside>
+        <div class="flex-1 flex flex-col min-w-0">
+          <div class="px-6 py-3 border-b border-zinc-800 text-xs text-zinc-500 flex items-center gap-2">
+            <span class="font-mono" x-text="activePlaybook + '.md'"></span>
+            <button x-show="playbookDirty" @click="savePlaybook()" class="ml-auto text-xs px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1.5">
+              <span x-html="icons.save"></span> Save
+            </button>
+          </div>
+          <textarea x-model="playbookDraft"
+                    @input="markPlaybookDirty()"
+                    @keydown.meta.s.prevent="savePlaybook()"
+                    @keydown.ctrl.s.prevent="savePlaybook()"
+                    class="flex-1 bg-zinc-950 p-6 text-sm font-mono leading-relaxed outline-none whitespace-pre-wrap resize-none"
+                    spellcheck="false"
+                    placeholder="(empty — click 'Install default playbooks' to seed)"></textarea>
+        </div>
+      </section>
+
       <!-- ─────── SETTINGS ─────── -->
       <section x-show="activeTab === 'settings' && selected" class="p-8 max-w-3xl mx-auto">
         <h2 class="text-xl font-bold mb-1">Settings</h2>
@@ -697,24 +799,57 @@
   </div>
 </div>
 
-<!-- ─────── CONTACT MEMORY EDITOR (drawer) ─────── -->
-<div x-show="contactEditor.open" x-transition.opacity
-     class="fixed inset-0 bg-black/60 z-40 flex justify-end" @click.self="closeContactEditor()">
-  <div x-show="contactEditor.open" x-transition
-       class="bg-zinc-950 border-l border-zinc-800 w-full max-w-3xl h-full flex flex-col">
+<!-- ─────── MEMORY v2 — TABBED CONTACT EDITOR (drawer) ─────── -->
+<div x-show="memoryV2.open" x-transition.opacity
+     class="fixed inset-0 bg-black/60 z-40 flex justify-end" @click.self="closeMemoryV2()">
+  <div x-show="memoryV2.open" x-transition
+       class="bg-zinc-950 border-l border-zinc-800 w-full max-w-4xl h-full flex flex-col">
     <header class="border-b border-zinc-800 px-6 py-3 flex items-center gap-4">
-      <h3 class="font-mono text-sm">📝 contacts/<span x-text="contactEditor.jid"></span>.md</h3>
-      <span x-show="contactEditor.draft !== contactEditor.saved" class="text-xs text-amber-400">● unsaved</span>
-      <div class="flex-1"></div>
-      <button @click="saveContactEditor()" class="text-xs px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white">💾 Save</button>
-      <button @click="closeContactEditor()" class="text-xs px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800">✕ close</button>
+      <span x-html="icons.user" class="text-emerald-400 text-lg"></span>
+      <div class="flex-1 min-w-0">
+        <h3 class="font-mono text-sm" x-text="'contacts/' + memoryV2.jid + '/'"></h3>
+        <p x-show="memoryV2.legacy" class="text-xs text-amber-400">legacy single-file contact — saving will migrate to v2 directory structure</p>
+      </div>
+      <span x-show="Object.values(memoryV2.dirty).some(v => v)" class="text-xs text-amber-400 flex items-center gap-1">
+        <span x-html="icons.dot"></span> unsaved
+      </span>
+      <button @click="saveMemoryV2()" class="text-xs px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1.5">
+        <span x-html="icons.save"></span> Save
+      </button>
+      <button @click="closeMemoryV2()" class="text-xs px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800 flex items-center gap-1.5">
+        <span x-html="icons.x"></span> close
+      </button>
     </header>
-    <textarea x-model="contactEditor.draft"
-              @keydown.meta.s.prevent="saveContactEditor()"
-              @keydown.ctrl.s.prevent="saveContactEditor()"
+
+    <!-- Sub-file tabs -->
+    <nav class="border-b border-zinc-800 px-4 flex gap-1">
+      <template x-for="sub in memoryV2.subs" :key="sub">
+        <button @click="switchMemorySub(sub)"
+                :class="memoryV2.activeSub === sub ? 'border-b-2 border-emerald-400 text-emerald-400' : 'border-b-2 border-transparent hover:bg-zinc-900'"
+                class="px-4 py-2 text-xs font-mono uppercase tracking-wide flex items-center gap-1.5">
+          <span x-text="sub"></span>
+          <span x-show="memoryV2.dirty[sub]" x-html="icons.dot" class="text-amber-400"></span>
+        </button>
+      </template>
+    </nav>
+
+    <!-- Help text per tab -->
+    <div class="px-6 py-2 text-xs text-zinc-500 border-b border-zinc-800/50 bg-zinc-900/30">
+      <span x-show="memoryV2.activeSub === 'card'">Always-loaded snapshot — relationship_tag + top_facts + open_threads. Keep ≤ 2KB.</span>
+      <span x-show="memoryV2.activeSub === 'facts'">Demand-loaded — biographical, professional, family.</span>
+      <span x-show="memoryV2.activeSub === 'preferences'">Demand-loaded — likes / avoids / observed reactions.</span>
+      <span x-show="memoryV2.activeSub === 'voice'">Demand-loaded — how they write (length, slang, emoji, formality).</span>
+      <span x-show="memoryV2.activeSub === 'timeline'">Demand-loaded — chronological summary.</span>
+      <span x-show="memoryV2.activeSub === 'notes'">Append-only flow of observations.</span>
+    </div>
+
+    <textarea x-model="memoryV2.draft[memoryV2.activeSub]"
+              @input="markMemoryDirty()"
+              @keydown.meta.s.prevent="saveMemoryV2()"
+              @keydown.ctrl.s.prevent="saveMemoryV2()"
               class="flex-1 bg-zinc-950 p-6 text-sm font-mono leading-relaxed outline-none whitespace-pre-wrap resize-none"
               spellcheck="false"
-              placeholder="(empty — write things to remember about this contact)"></textarea>
+              placeholder="(empty)"></textarea>
   </div>
 </div>
 

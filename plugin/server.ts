@@ -43,18 +43,39 @@ const WACLI_ACCOUNT = (() => {
   catch { return 'main' }
 })()
 
-type Access = { allowFrom: string[]; disabled?: boolean }
+type Access = { allowFrom: string[]; disabled?: boolean; mode?: string }
 
 function loadAccess(): Access {
   try {
     const parsed = JSON.parse(readFileSync(ACCESS_FILE, 'utf8')) as Partial<Access>
-    return { allowFrom: parsed.allowFrom ?? [], disabled: parsed.disabled }
+    return { allowFrom: parsed.allowFrom ?? [], disabled: parsed.disabled, mode: parsed.mode }
   } catch { return { allowFrom: [] } }
 }
 
+// HARD ISOLATION: when router spawns claude for a dispatcher-routed turn, it
+// passes CC_WHATSAPP_ALLOWED_JIDS=<jid1>,<jid2> in env. We enforce that ANY
+// MCP tool call MUST target one of those JIDs — even if a prompt-injection
+// attempt convinces claude to send messages to other JIDs, this layer
+// rejects them. Without the env var, we fall back to access.json's allowFrom
+// (legacy / single-project behavior).
+const HARD_ISOLATION_JIDS: string[] | null = (() => {
+  const raw = process.env.CC_WHATSAPP_ALLOWED_JIDS
+  if (!raw) return null
+  return raw.split(',').map(s => s.trim()).filter(Boolean)
+})()
+
 function assertAllowed(jid: string): void {
+  if (HARD_ISOLATION_JIDS !== null) {
+    if (!HARD_ISOLATION_JIDS.includes(jid)) {
+      throw new Error(`hard-isolation violation: jid ${jid} not in spawn-scoped ALLOWED_JIDS (${HARD_ISOLATION_JIDS.join(', ')})`)
+    }
+    return  // hard isolation overrides access.json (router already pre-checked)
+  }
+  // Legacy: access.json-based allowlist
   const a = loadAccess()
   if (a.disabled) throw new Error('whatsapp channel disabled in access.json')
+  // open mode: allow if mode='open' OR jid is in allowFrom
+  if (a.mode === 'open') return
   if (!a.allowFrom.includes(jid)) {
     throw new Error(`jid ${jid} not in allowFrom — edit ${ACCESS_FILE}`)
   }

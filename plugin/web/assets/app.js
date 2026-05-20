@@ -14,17 +14,40 @@ function app() {
     // component instance), so referencing this.personaDirty inside an arrow
     // function defined here would throw at render time.
     tabs: [
-      { id: 'projects',   icon: '🏠', label: 'Projects',    needsProject: false },
-      { id: 'overview',   icon: '📊', label: 'Overview',    needsProject: true },
-      { id: 'chats',      icon: '💬', label: 'Chats',       needsProject: true },
-      { id: 'persona',    icon: '🎭', label: 'Persona',     needsProject: true },
-      { id: 'tunables',   icon: '🎚',  label: 'Tunables',    needsProject: true },
-      { id: 'production', icon: '🔬', label: 'Production',  needsProject: true },
-      { id: 'access',     icon: '🔐', label: 'Access',      needsProject: true },
-      { id: 'mcp-tools',  icon: '🔧', label: 'MCP & Tools', needsProject: true },
-      { id: 'settings',   icon: '⚙️',  label: 'Settings',    needsProject: true },
+      { id: 'accounts',   icon: 'phone',      label: 'Accounts',    needsProject: false },
+      { id: 'projects',   icon: 'folder',     label: 'Projects',    needsProject: false },
+      { id: 'overview',   icon: 'chart',      label: 'Overview',    needsProject: true },
+      { id: 'chats',      icon: 'chat',       label: 'Chats',       needsProject: true },
+      { id: 'persona',    icon: 'mask',       label: 'Persona',     needsProject: true },
+      { id: 'tunables',   icon: 'sliders',    label: 'Tunables',    needsProject: true },
+      { id: 'production', icon: 'microscope', label: 'Production',  needsProject: true },
+      { id: 'access',     icon: 'lock',       label: 'Access',      needsProject: true },
+      { id: 'mcp-tools',  icon: 'wrench',     label: 'MCP & Tools', needsProject: true },
+      { id: 'playbooks',  icon: 'book',       label: 'Playbooks',   needsProject: true },
+      { id: 'settings',   icon: 'settings',   label: 'Settings',    needsProject: true },
     ],
-    activeTab: 'projects',
+    activeTab: 'accounts',
+    accounts: [],
+    accountDetail: null,    // currently expanded account
+    accountBindingDraft: { groupJid: '', targetProjectId: '' },
+    accountDefaultDraft: '',
+
+    // ─── memory v2 ───
+    memoryV2: {
+      open: false, jid: '', activeSub: 'card',
+      subs: ['card', 'facts', 'preferences', 'voice', 'timeline', 'notes'],
+      saved: {},   // { card: '...', facts: '...', ... }
+      draft: {},
+      dirty: {},
+      legacy: false,
+    },
+
+    // ─── playbooks ───
+    playbooks: [],
+    activePlaybook: '',
+    playbookSaved: '',
+    playbookDraft: '',
+    playbookDirty: false,
     pendingTab: null,
     confirmTab: false,
     showApplyTemplate: false,
@@ -211,13 +234,23 @@ function app() {
       this.availableTemplates = templates
 
       await this.refresh()
+      await this.loadAccounts()
       if (this.projects.length > 0) {
         await this.select(this.projects[0].id)
-        this.activeTab = 'overview'
+        // Start on Accounts (new top-level orientation)
+        this.activeTab = 'accounts'
       } else {
-        this.activeTab = 'projects'
+        this.activeTab = 'accounts'
       }
       setInterval(() => { if (this.selectedId) this.pollLiveState() }, 2000)
+      setInterval(() => this.loadAccounts(), 5000)
+    },
+
+    async loadAccounts() {
+      try {
+        const r = await fetch('/api/accounts')
+        this.accounts = await r.json()
+      } catch {}
     },
 
     async refresh() {
@@ -366,6 +399,7 @@ function app() {
         this.loadTurns(),
         this.loadExtraMcps(),
         this.loadOwnerJid(),
+        this.loadPlaybooks(),
         this.pollLiveState(),
       ])
       this.connectTrace()
@@ -546,15 +580,143 @@ function app() {
       })
     },
 
-    // ─── contact memory editor ───
+    // ─── contact memory editor (legacy, kept for backward compat) ───
     async openContactFile(jid) {
-      const r = await fetch(`/api/projects/${this.selectedId}/contacts/${encodeURIComponent(jid)}`)
+      // New default: open memory v2 multi-tab drawer
+      await this.openMemoryV2(jid)
+    },
+
+    // ─── memory v2 (multi-tab per-contact directory editor) ───
+    async openMemoryV2(jid) {
+      const r = await fetch(`/api/projects/${this.selectedId}/contacts-v2/${encodeURIComponent(jid)}`)
       const data = await r.json()
-      this.contactEditor = {
+      const subs = ['card', 'facts', 'preferences', 'voice', 'timeline', 'notes']
+      const saved = {}
+      for (const s of subs) saved[s] = data[s] ?? ''
+      this.memoryV2 = {
         open: true, jid,
-        saved: data.content ?? '',
-        draft: data.content ?? '',
+        activeSub: 'card',
+        subs,
+        saved,
+        draft: { ...saved },
+        dirty: {},
+        legacy: data._legacy === '1',
       }
+    },
+    closeMemoryV2() {
+      if (Object.values(this.memoryV2.dirty).some(v => v)) {
+        if (!confirm('Unsaved changes will be lost. Close anyway?')) return
+      }
+      this.memoryV2.open = false
+    },
+    switchMemorySub(name) {
+      this.memoryV2.activeSub = name
+    },
+    markMemoryDirty() {
+      const cur = this.memoryV2.draft[this.memoryV2.activeSub] ?? ''
+      const saved = this.memoryV2.saved[this.memoryV2.activeSub] ?? ''
+      this.memoryV2.dirty[this.memoryV2.activeSub] = cur !== saved
+    },
+    async saveMemoryV2() {
+      const dirtySubs = Object.keys(this.memoryV2.dirty).filter(s => this.memoryV2.dirty[s])
+      let savedCount = 0
+      for (const sub of dirtySubs) {
+        const r = await fetch(`/api/projects/${this.selectedId}/contacts-v2/${encodeURIComponent(this.memoryV2.jid)}/${sub}`, {
+          method: 'PUT', headers: { 'Content-Type': 'text/plain' },
+          body: this.memoryV2.draft[sub] ?? '',
+        })
+        if (r.ok) {
+          this.memoryV2.saved[sub] = this.memoryV2.draft[sub]
+          this.memoryV2.dirty[sub] = false
+          savedCount++
+        }
+      }
+      this.flashToast(`Saved ${savedCount} memory file(s)`)
+    },
+
+    // ─── playbooks ───
+    async loadPlaybooks() {
+      if (!this.selectedId) return
+      const r = await fetch(`/api/projects/${this.selectedId}/playbooks`)
+      this.playbooks = await r.json()
+      if (this.playbooks.length > 0 && !this.activePlaybook) {
+        this.activePlaybook = this.playbooks[0].name
+      }
+      this.loadActivePlaybookContent()
+    },
+    loadActivePlaybookContent() {
+      const pb = this.playbooks.find(p => p.name === this.activePlaybook)
+      this.playbookSaved = pb?.content ?? ''
+      this.playbookDraft = this.playbookSaved
+      this.playbookDirty = false
+    },
+    switchPlaybook(name) {
+      if (this.playbookDirty && !confirm('Unsaved playbook changes — switch anyway?')) return
+      this.activePlaybook = name
+      this.loadActivePlaybookContent()
+    },
+    markPlaybookDirty() {
+      this.playbookDirty = this.playbookDraft !== this.playbookSaved
+    },
+    async savePlaybook() {
+      const r = await fetch(`/api/projects/${this.selectedId}/playbooks/${encodeURIComponent(this.activePlaybook)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'text/plain' },
+        body: this.playbookDraft,
+      })
+      if (!r.ok) { this.flashToast('Save failed', 'error'); return }
+      this.playbookSaved = this.playbookDraft
+      this.playbookDirty = false
+      this.flashToast(`Saved playbook: ${this.activePlaybook}`)
+    },
+    async installDefaultPlaybooks() {
+      const r = await fetch(`/api/projects/${this.selectedId}/playbooks/install-defaults`, { method: 'POST' })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Install failed', 'error'); return }
+      this.flashToast(`Installed ${d.playbooks.length} playbooks`)
+      await this.loadPlaybooks()
+    },
+
+    // ─── dispatcher bindings ───
+    async loadDispatcher() {
+      if (!this.selectedId) return
+      const r = await fetch(`/api/projects/${this.selectedId}/dispatcher`)
+      const data = await r.json()
+      return data
+    },
+    async addBinding(jid, targetProjectId) {
+      const r = await fetch(`/api/projects/${this.selectedId}/dispatcher/bindings`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jid, targetProjectId }),
+      })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Bind failed: ' + (d.err ?? 'unknown'), 'error'); return false }
+      this.flashToast('Binding added')
+      await this.loadAccounts()
+      return true
+    },
+    async removeBinding(jid) {
+      if (!confirm(`Remove binding for ${jid}?`)) return
+      const r = await fetch(`/api/projects/${this.selectedId}/dispatcher/bindings/${encodeURIComponent(jid)}`, { method: 'DELETE' })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Unbind failed', 'error'); return }
+      this.flashToast('Binding removed')
+      await this.loadAccounts()
+    },
+    async setDefaultProject(targetProjectId) {
+      const r = await fetch(`/api/projects/${this.selectedId}/dispatcher/default`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetProjectId }),
+      })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Set default failed', 'error'); return }
+      this.flashToast('Default project saved')
+      await this.loadAccounts()
+    },
+    async loadRecentJids(projectId) {
+      try {
+        const r = await fetch(`/api/projects/${projectId}/recent-jids`)
+        return await r.json()
+      } catch { return [] }
     },
     closeContactEditor() {
       if (this.contactEditor.draft !== this.contactEditor.saved) {
