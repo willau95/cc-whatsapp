@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup CI Environment
+        uses: ./.github/actions/setup-ci-env
+        with:
+          setup-node: "true"
+          node-version: "24"
+          setup-pnpm: "true"
+          apt-packages: "build-essential"
+
+      - name: pnpm format:check
+        run: pnpm -s format:check
+
+      - name: pnpm lint
+        run: pnpm -s lint
+
+      - name: pnpm test
+        env:
+          CGO_ENABLED: "1"
+        run: pnpm -s test
+
+      - name: pnpm build
+        env:
+          CGO_ENABLED: "1"
+        run: pnpm -s build
+
+  linux-release-builds:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup CI Environment
+        uses: ./.github/actions/setup-ci-env
+        with:
+          go-version-file: go.mod
+          apt-packages: "build-essential gcc-aarch64-linux-gnu libc6-dev-arm64-cross"
+
+      - name: GoReleaser check (macOS)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: check --config .goreleaser.yaml
+
+      - name: GoReleaser check (linux/windows)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: check --config .goreleaser-linux-windows.yaml
+
+      - name: GoReleaser build (linux amd64/arm64)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: build --snapshot --clean --config .goreleaser-linux-windows.yaml --id wacli_linux_amd64 --id wacli_linux_arm64

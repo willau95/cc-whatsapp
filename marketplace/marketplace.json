@@ -1,0 +1,12 @@
+{
+  "name": "cc-whatsapp-marketplace",
+  "displayName": "cc-whatsapp",
+  "description": "Local marketplace serving the cc-whatsapp plugin. Phase 2 staging — until/unless published publicly, install via --plugin-dir.",
+  "plugins": {
+    "cc-whatsapp": {
+      "version": "0.1.0",
+      "source": "../plugin",
+      "description": "Bind a WhatsApp number to a Claude Code project."
+    }
+  }
+}

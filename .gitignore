@@ -1,0 +1,38 @@
+# Build artifacts
+bin/cc-whatsapp
+bin/
+plugin/node_modules/
+plugin/bun.lock
+
+# Runtime state (should never be in repo — these are per-consumer-project)
+**/access.json
+**/sessions.json
+**/.secret
+**/trace.log
+**/router.pid
+**/sync.pid
+**/run.command
+**/inbox/
+**/agent/contacts/*.md
+!**/agent/contacts/TEMPLATE.md
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Server build leftovers
+server/.send.sock
+server/*.db
+server/*.db-shm
+server/*.db-wal
+
+# Old refactor placeholders
+**/.serena/
+**/.codeium/
+**/.omo/
+
+# Generated docs / changes (we'll write our own)
+server/.changeset/

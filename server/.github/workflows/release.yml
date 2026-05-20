@@ -1,0 +1,168 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to (re)release (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  goreleaser-darwin:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: ./.github/actions/setup-ci-env
+        with:
+          go-version-file: go.mod
+
+      - name: Stash GoReleaser config
+        run: cp .goreleaser.yaml /tmp/.goreleaser.yaml
+
+      - name: Checkout release tag
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: git checkout -- "$RELEASE_TAG"
+
+      - name: GoReleaser (macOS universal)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --config /tmp/.goreleaser.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew-tap:
+    runs-on: ubuntu-latest
+    needs: goreleaser-darwin
+    steps:
+      - name: Resolve release tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=$INPUT_TAG" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=$REF_NAME" >> "$GITHUB_ENV"
+          fi
+
+      - name: Dispatch tap formula update
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::Skipping Homebrew tap update because HOMEBREW_TAP_TOKEN is not configured with workflow access to steipete/homebrew-tap"
+            exit 0
+          fi
+
+          request_id="wacli-${RELEASE_TAG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          expected_title="Update wacli for ${RELEASE_TAG} (${request_id})"
+
+          gh workflow run update-formula.yml \
+            --repo steipete/homebrew-tap \
+            --ref main \
+            -f formula=wacli \
+            -f tag="$RELEASE_TAG" \
+            -f repository=openclaw/wacli \
+            -f macos_artifact=wacli-macos-universal.tar.gz \
+            -f request_id="$request_id"
+
+          run_id=""
+          for _ in {1..30}; do
+            run_id=$(gh run list \
+              --repo steipete/homebrew-tap \
+              --workflow update-formula.yml \
+              --branch main \
+              --event workflow_dispatch \
+              --limit 20 \
+              --json databaseId,displayTitle \
+              --jq ".[] | select(.displayTitle == \"$expected_title\") | .databaseId" | head -n1)
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "$run_id" ]; then
+            echo "::error::Could not find tap workflow run with title: $expected_title"
+            exit 1
+          fi
+
+          gh run watch "$run_id" \
+            --repo steipete/homebrew-tap \
+            --exit-status \
+            --interval 10
+
+  goreleaser-linux-windows:
+    runs-on: ubuntu-latest
+    needs: goreleaser-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: ./.github/actions/setup-ci-env
+        with:
+          go-version-file: go.mod
+          apt-packages: "build-essential gcc-aarch64-linux-gnu libc6-dev-arm64-cross mingw-w64"
+
+      - name: Stash GoReleaser config
+        run: cp .goreleaser-linux-windows.yaml /tmp/.goreleaser-linux-windows.yaml
+
+      - name: Checkout release tag
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: git checkout -- "$RELEASE_TAG"
+
+      - name: GoReleaser (linux/windows)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --skip=publish --config /tmp/.goreleaser-linux-windows.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve release tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=$INPUT_TAG" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=$REF_NAME" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload linux/windows artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            dist/*.tar.gz \
+            dist/*.zip \
+            dist/checksums-linux-windows.txt \
+            --clobber
