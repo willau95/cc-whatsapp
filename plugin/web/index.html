@@ -138,6 +138,22 @@
           <button @click="openPair()" class="text-sm px-4 py-2 rounded bg-amber-700 hover:bg-amber-600 text-white">📲 Pair WhatsApp</button>
         </div>
 
+        <!-- Connection-unstable warning (Desktop / Web stealing the socket) -->
+        <div x-show="selected && selected.health && selected.health.connection_unstable && selected.routerAlive"
+             class="mb-6 bg-red-900/20 border border-red-700/40 rounded-xl p-5 flex items-start gap-4">
+          <div class="text-3xl">⚠️</div>
+          <div class="flex-1">
+            <div class="font-bold text-red-300">WhatsApp connection unstable</div>
+            <div class="text-sm text-zinc-300 mt-1">
+              Saw <strong x-text="selected?.health?.disconnects_60s"></strong> disconnect/reconnect cycles in the last 60s.
+              WhatsApp's protocol allows only ONE active linked-device socket per account — if you also have <strong>WhatsApp Desktop</strong> or <strong>WhatsApp Web</strong> open for the same number (<code class="text-zinc-300" x-text="selected?.account"></code>), they're fighting for the socket and the bot will miss messages.
+            </div>
+            <div class="text-xs text-zinc-400 mt-2">
+              Fix: quit WhatsApp Desktop / close all WhatsApp Web tabs, then <button @click="stopRouter().then(()=>setTimeout(startRouter,1500))" class="underline text-red-300 hover:text-red-200">restart this router</button>.
+            </div>
+          </div>
+        </div>
+
         <div class="grid grid-cols-3 gap-4 mb-8">
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
             <div class="text-xs text-zinc-500 mb-1">Account</div>

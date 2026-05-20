@@ -71,6 +71,12 @@ type Project = {
   disabled: boolean
   contactCount: number
   paired: boolean
+  health?: {
+    connection_unstable: boolean
+    disconnects_60s: number
+    last_disconnect_at?: string
+    last_connected_at?: string
+  }
 }
 
 function pathToId(absPath: string): string {
@@ -92,6 +98,7 @@ function projectInfo(absPath: string): Project {
     contactCount = readdirSync(cdir).filter(f => f.endsWith('.md') && f !== 'TEMPLATE.md').length
   } catch {}
   const account = cfg.account ?? 'main'
+  const health = readJsonSafe(join(stateDir, 'health.json')) ?? undefined
   return {
     id: pathToId(absPath),
     path: absPath,
@@ -105,6 +112,7 @@ function projectInfo(absPath: string): Project {
     disabled: !!access.disabled,
     contactCount,
     paired: isAccountPaired(account),
+    health,
   }
 }
 

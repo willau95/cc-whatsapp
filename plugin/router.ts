@@ -38,6 +38,7 @@ const ROUTER_PID    = join(STATE_DIR, 'router.pid')
 const SYNC_PID      = join(STATE_DIR, 'sync.pid')
 const TRACE_FILE    = join(STATE_DIR, 'trace.log')
 const STATE_SNAP    = join(STATE_DIR, 'state.json')   // live state machine snapshot (dashboard polls)
+const HEALTH_SNAP   = join(STATE_DIR, 'health.json')  // wacli connection health (dashboard surfaces as banner)
 const TURNS_DIR     = join(STATE_DIR, 'turns')         // per-turn prompt/response snapshots
 const AGENT_DIR     = join(STATE_DIR, 'agent')
 const CONTACTS_DIR  = join(AGENT_DIR, 'contacts')
@@ -691,7 +692,40 @@ const syncProc = spawn(
   { stdio: ['ignore', 'pipe', 'pipe'] },
 )
 writeFileSync(SYNC_PID, String(syncProc.pid))
-syncProc.stderr.on('data', d => trace('wacli_stderr', d.toString().trim().slice(0, 300)))
+
+// Track wacli connection health. WhatsApp's MD protocol allows only ONE
+// active websocket per linked-device — if WhatsApp Desktop / Web is running
+// for the same account, both fight for the socket and we see a tight
+// Disconnect/Reconnect loop. Detect that and surface to dashboard.
+const disconnectTimes: number[] = []
+let lastConnectedAt = ''
+function writeHealth(unstable: boolean): void {
+  try {
+    writeFileSync(HEALTH_SNAP, JSON.stringify({
+      connection_unstable: unstable,
+      disconnects_60s: disconnectTimes.length,
+      last_connected_at: lastConnectedAt,
+      last_disconnect_at: disconnectTimes.length ? new Date(disconnectTimes[disconnectTimes.length - 1]!).toISOString() : '',
+      account: WACLI_ACCOUNT,
+    }, null, 2))
+  } catch {}
+}
+writeHealth(false)
+
+syncProc.stderr.on('data', d => {
+  const txt = d.toString()
+  const now = Date.now()
+  if (txt.includes('Disconnected')) {
+    disconnectTimes.push(now)
+    while (disconnectTimes.length && now - disconnectTimes[0]! > 60_000) disconnectTimes.shift()
+    if (disconnectTimes.length > 10) writeHealth(true)
+  } else if (txt.includes('Connected.')) {
+    lastConnectedAt = new Date(now).toISOString()
+    disconnectTimes.length = 0
+    writeHealth(false)
+  }
+  trace('wacli_stderr', txt.trim().slice(0, 300))
+})
 syncProc.on('exit', code => trace('wacli_exit', { code }))
 
 // ─────────── lifecycle ───────────
