@@ -769,6 +769,21 @@ function app() {
     // QR rendering is server-side (dashboard.ts uses qrcode npm pkg via Bun).
     // PNG dataURL arrives via SSE 'qr_image' event — we just set img.src.
 
+    // ─── open claude terminal (project-level or per-conversation) ───
+    async openTerminal(jid) {
+      const body = jid ? { jid } : {}
+      const r = await fetch(`/api/projects/${this.selectedId}/open-terminal`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const d = await r.json()
+      if (!d.ok) {
+        this.flashToast('Open terminal failed: ' + (d.err ?? 'unknown'), 'error')
+        return
+      }
+      this.flashToast(jid ? '🖥 Opening conversation in Terminal…' : '🖥 Opening Claude in Terminal…')
+    },
+
     // ─── project delete ───
     async deleteProject() {
       if (!confirm(`Delete config for "${this.selected.name}"? Wipes .claude/cc-whatsapp/. The project folder itself stays.`)) return

@@ -125,8 +125,16 @@
 
       <!-- ─────── OVERVIEW ─────── -->
       <section x-show="activeTab === 'overview' && selected" class="p-8 max-w-5xl mx-auto">
-        <h2 class="text-2xl font-bold mb-1" x-text="selected?.name"></h2>
-        <p class="text-zinc-500 text-sm font-mono mb-6" x-text="selected?.path"></p>
+        <div class="flex items-start gap-4 mb-6">
+          <div class="flex-1">
+            <h2 class="text-2xl font-bold mb-1" x-text="selected?.name"></h2>
+            <p class="text-zinc-500 text-sm font-mono" x-text="selected?.path"></p>
+          </div>
+          <button @click="openTerminal()"
+                  class="text-xs px-3 py-1.5 rounded border border-zinc-700 hover:bg-zinc-800 flex items-center gap-2 shrink-0">
+            🖥 <span>Open Claude here</span>
+          </button>
+        </div>
 
         <!-- Unpaired warning -->
         <div x-show="selected && !selected.paired" class="mb-6 bg-amber-900/20 border border-amber-700/40 rounded-xl p-5 flex items-center gap-4">
@@ -246,6 +254,11 @@
                   <div class="text-xs text-zinc-500 font-mono" x-text="activeChat"></div>
                 </div>
                 <div class="flex-1"></div>
+                <button @click="openTerminal(activeChat)"
+                        class="text-xs px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800"
+                        title="Open this conversation's Claude session in Terminal (resumes the JSONL history)">
+                  🖥 open in terminal
+                </button>
                 <button @click="openContactFile(activeChat)"
                         class="text-xs px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800">
                   📝 contact memory

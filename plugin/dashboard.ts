@@ -11,17 +11,19 @@
  */
 
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   statSync,
+  unlinkSync,
   writeFileSync,
   renameSync,
   copyFileSync,
   rmSync,
 } from 'fs'
-import { homedir } from 'os'
+import { homedir, tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { spawn, type ChildProcess } from 'child_process'
@@ -551,6 +553,59 @@ exec bun "$REPO/plugin/router.ts"
   try { require('fs').chmodSync(routerLaunchScript(id), 0o755) } catch {}
 }
 
+// ─── Interactive claude terminal launcher ─────────────────────────────────
+// Opens Terminal.app with claude code pre-loaded in the project's dir.
+// Two modes:
+//   - project-level: fresh interactive session (no --resume)
+//   - conversation-level: --resume <session-uuid> from sessions.json[jid]
+// Each click writes a tiny .command file in /tmp; macOS Terminal opens it.
+
+function cleanStaleLaunchers(): void {
+  try {
+    for (const f of readdirSync(tmpdir())) {
+      if (!f.startsWith('cc-whatsapp-open-') || !f.endsWith('.command')) continue
+      const p = join(tmpdir(), f)
+      try {
+        const st = statSync(p)
+        if (Date.now() - st.mtimeMs > 3_600_000) unlinkSync(p)   // > 1 hour old
+      } catch {}
+    }
+  } catch {}
+}
+
+function openClaudeTerminal(id: string, jid?: string): { ok: boolean; err?: string } {
+  const projectPath = idToPath(id)
+  if (!existsSync(projectPath)) return { ok: false, err: 'project not found' }
+  const name = projectPath.split('/').pop()!
+
+  let resumeArgs = ''
+  let titleSuffix = 'interactive'
+  if (jid) {
+    const sessions = readJsonSafe(join(getStateDir(id), 'sessions.json')) ?? {}
+    const uuid = sessions[jid]
+    if (!uuid) return { ok: false, err: `no claude session for ${jid} yet — bot hasn't processed any message from them` }
+    resumeArgs = ` --resume ${uuid}`
+    titleSuffix = jid
+  }
+
+  const title = `cc-whatsapp · ${name} · ${titleSuffix}`
+  const tmpPath = join(tmpdir(), `cc-whatsapp-open-${name}-${Date.now()}.command`)
+  // .command files: macOS Terminal runs them on open. printf sets the window title via OSC 0.
+  const script = `#!/bin/bash
+printf '\\033]0;${title.replace(/'/g, "'\\''")}\\007'
+cd ${JSON.stringify(projectPath)} || exit 1
+exec claude --plugin-dir ${JSON.stringify(PLUGIN_ROOT)} --dangerously-skip-permissions${resumeArgs}
+`
+  try {
+    writeFileSync(tmpPath, script)
+    chmodSync(tmpPath, 0o755)
+    spawn('open', ['-a', 'Terminal', tmpPath], { stdio: 'ignore', detached: true }).unref()
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, err: String(err) }
+  }
+}
+
 function stopRouter(id: string): { ok: boolean; err?: string } {
   const stateDir = getStateDir(id)
   const routerPid = readPidSafe(join(stateDir, 'router.pid'))
@@ -1073,6 +1128,12 @@ const server = (globalThis as any).Bun.serve({
       }
       if (sub === '/router/stop' && req.method === 'POST') {
         return json(stopRouter(id))
+      }
+
+      // OPEN CLAUDE TERMINAL (project-level or conversation-level)
+      if (sub === '/open-terminal' && req.method === 'POST') {
+        const body = await req.json().catch(() => ({})) as { jid?: string }
+        return json(openClaudeTerminal(id, body.jid))
       }
 
       // EXTRA MCPS
