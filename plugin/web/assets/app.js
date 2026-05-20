@@ -174,7 +174,7 @@ function app() {
     // ─── link-existing-project modal ───
     linkExisting: {
       open: false, step: 1, busy: false, error: null,
-      projectDir: '', account: '', ownerJid: '', template: 'eva',
+      projectDir: '', account: '', ownerJid: '',
       newProjectId: null,
       warnings: [],
       pairStatus: 'idle', pairError: '', qrDataUrl: '',
@@ -266,7 +266,7 @@ function app() {
     openLinkExisting() {
       this.linkExisting = {
         open: true, step: 1, busy: false, error: null,
-        projectDir: '', account: '', ownerJid: '', template: 'eva',
+        projectDir: '', account: '', ownerJid: '',
         newProjectId: null, warnings: [],
         pairStatus: 'idle', pairError: '', qrDataUrl: '',
         eventSource: null,
@@ -294,7 +294,6 @@ function app() {
           body: JSON.stringify({
             projectDir: this.linkExisting.projectDir,
             account: this.linkExisting.account,
-            template: this.linkExisting.template,
             ownerJid: (this.linkExisting.ownerJid || '').trim() || undefined,
           }),
         })

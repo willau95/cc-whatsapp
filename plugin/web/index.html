@@ -733,34 +733,26 @@
     </header>
     <div class="p-6 space-y-4 flex-1 overflow-y-auto">
       <div x-show="linkExisting.step === 1" class="space-y-4">
-        <div class="bg-blue-900/20 border border-blue-700/30 rounded-lg p-3 text-xs text-zinc-300">
-          <strong>Use case:</strong> You have a claude-code project (any cwd you've used <code>claude</code> in). Link WhatsApp so DMs from a designated "owner" JID become a remote terminal — same session UUID, shared conversation state.
+        <div class="bg-blue-900/20 border border-blue-700/30 rounded-lg p-3 text-xs text-zinc-300 leading-relaxed">
+          <strong>What this does:</strong> drops <code>.claude/cc-whatsapp/</code> into your existing project + scans QR. <strong>Touches NOTHING ELSE</strong> — your CLAUDE.md / .claude/agents/ / code untouched. Persona is whatever your project already defines.
         </div>
         <div>
           <label class="text-sm font-medium block mb-1">Project directory (absolute path)</label>
           <input x-model="linkExisting.projectDir" type="text" placeholder="/Users/you/Desktop/some-project"
                  class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
-          <p class="text-xs text-zinc-500 mt-1">Must already exist. We add <code>.claude/cc-whatsapp/</code> inside it.</p>
+          <p class="text-xs text-zinc-500 mt-1">Must already exist.</p>
         </div>
         <div>
           <label class="text-sm font-medium block mb-1">wacli account name</label>
           <input x-model="linkExisting.account" type="text" placeholder="my-account"
                  class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
-          <p class="text-xs text-zinc-500 mt-1">a-z 0-9 _ -, max 40 chars. The WhatsApp number you'll pair to this project.</p>
+          <p class="text-xs text-zinc-500 mt-1">Internal name for the WhatsApp number you'll scan. a-z 0-9 _ -, max 40 chars.</p>
         </div>
         <div>
-          <label class="text-sm font-medium block mb-1">Owner JID (optional, set later if unknown)</label>
-          <input x-model="linkExisting.ownerJid" type="text" placeholder="60123456789@s.whatsapp.net  OR leave blank"
+          <label class="text-sm font-medium block mb-1">Owner JID <span class="text-zinc-500">(optional)</span></label>
+          <input x-model="linkExisting.ownerJid" type="text" placeholder="60123456789@s.whatsapp.net (leave blank if unknown)"
                  class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
-          <p class="text-xs text-zinc-500 mt-1">YOUR personal WhatsApp number's JID (the one you'll DM the bot from). Its WA chat = shares terminal session.</p>
-        </div>
-        <div>
-          <label class="text-sm font-medium block mb-1">Persona template (skipped if agent/ already has md files)</label>
-          <select x-model="linkExisting.template" class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm">
-            <template x-for="t in availableTemplates" :key="t.id">
-              <option :value="t.id" x-text="t.icon + ' ' + t.label"></option>
-            </template>
-          </select>
+          <p class="text-xs text-zinc-500 mt-1">YOUR own WhatsApp number's JID. Its DMs to the bot share session UUID with your terminal claude in this dir. Settable later in Settings tab.</p>
         </div>
         <p x-show="linkExisting.error" class="text-sm text-red-400" x-text="linkExisting.error"></p>
         <template x-for="w in linkExisting.warnings" :key="w">

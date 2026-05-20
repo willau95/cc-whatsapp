@@ -447,10 +447,13 @@ function findLatestSessionUuid(projectPath: string): string | null {
   } catch { return null }
 }
 
-// Init a cc-whatsapp project in an EXISTING directory (vs createProject which
-// makes a fresh subdir). Persona templates only applied if no agent/ files
-// already exist. Skips overwriting existing config.json fields.
-function linkExistingProject(opts: { projectDir: string; account: string; template?: string; ownerJid?: string }): { ok: boolean; id?: string; err?: string; warnings?: string[] } {
+// Init a cc-whatsapp project in an EXISTING directory.
+// Philosophy: this is "import an existing claude-code project", NOT "set up a
+// bot persona". We do NOT write persona files, NOT write tunables (defaults
+// at read time), NOT touch the project's existing files. Just drop the minimum
+// IPC state under .claude/cc-whatsapp/ and let the user's CLAUDE.md /
+// .claude/agents/ define the persona at claude --resume time.
+function linkExistingProject(opts: { projectDir: string; account: string; ownerJid?: string }): { ok: boolean; id?: string; err?: string; warnings?: string[]; sessionUuid?: string } {
   const { projectDir, account } = opts
   if (!SAFE_NAME.test(account)) return { ok: false, err: 'account name must be a-z 0-9 _ - (max 40 chars)' }
   if (!existsSync(projectDir)) return { ok: false, err: `directory does not exist: ${projectDir}` }
@@ -464,21 +467,17 @@ function linkExistingProject(opts: { projectDir: string; account: string; templa
     return { ok: false, err: `already a cc-whatsapp project: ${projectDir}` }
   }
   const warnings: string[] = []
-
-  const agentDir = join(stateDir, 'agent')
-  const contactsDir = join(agentDir, 'contacts')
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
-  mkdirSync(agentDir, { recursive: true, mode: 0o700 })
-  mkdirSync(contactsDir, { recursive: true, mode: 0o700 })
 
-  // Owner JID lookup: find latest session UUID for this cwd, pre-populate.
+  // Owner-JID auto-binding to most-recent terminal session
   const sessions: Record<string, string> = {}
+  let sessionUuid: string | undefined
   if (opts.ownerJid) {
-    const uuid = findLatestSessionUuid(projectDir)
-    if (uuid) {
-      sessions[opts.ownerJid] = uuid
+    sessionUuid = findLatestSessionUuid(projectDir) ?? undefined
+    if (sessionUuid) {
+      sessions[opts.ownerJid] = sessionUuid
     } else {
-      warnings.push(`No existing claude session found at ~/.claude/projects/<cwd-hash>/ — owner JID will get a fresh session UUID on first message. Run "claude" in the project directory once first if you want to share an existing terminal session.`)
+      warnings.push('No claude session found yet for this cwd. Run "claude" once in the project to start one — then this WhatsApp chat will share its session.')
     }
   }
 
@@ -488,33 +487,10 @@ function linkExistingProject(opts: { projectDir: string; account: string; templa
   })
   writeJsonAtomic(join(stateDir, 'access.json'), { allowFrom: [], mode: 'open' })
   writeJsonAtomic(join(stateDir, 'sessions.json'), sessions)
-  writeJsonAtomic(join(stateDir, 'tunables.json'), {})
-
-  // Persona templates: apply only if agent/ is empty (don't overwrite existing files)
-  const personaExists = ['IDENTITY', 'SOUL', 'STYLE', 'AGENTS', 'MEMORY']
-    .some(n => existsSync(join(agentDir, `${n}.md`)))
-  if (!personaExists) {
-    const tplId = opts.template || 'eva'
-    const tpl = readTemplateFiles(tplId) ?? readTemplateFiles('eva')
-    if (tpl) {
-      for (const [name, content] of Object.entries(tpl)) {
-        writeFileAtomic(join(agentDir, name), content)
-      }
-    }
-  } else {
-    warnings.push('Persona files already exist in agent/ — skipped template install')
-  }
-
-  try {
-    const src = join(TEMPLATES_AGENT, 'contacts', 'TEMPLATE.md')
-    if (existsSync(src) && !existsSync(join(contactsDir, 'TEMPLATE.md'))) {
-      copyFileSync(src, join(contactsDir, 'TEMPLATE.md'))
-    }
-  } catch {}
 
   const id = pathToId(projectDir)
   generateRunCommand(id)
-  return { ok: true, id, warnings }
+  return { ok: true, id, warnings, sessionUuid }
 }
 
 const SAFE_NAME = /^[a-z0-9_-]{1,40}$/i
@@ -1017,13 +993,12 @@ const server = (globalThis as any).Bun.serve({
       })
       return json(result, result.ok ? 200 : 400)
     }
-    // Link an EXISTING directory (alternative to createProject)
+    // Link an EXISTING directory (no persona, no overwrite — just QR-scan attach)
     if (p === '/api/projects/link-existing' && req.method === 'POST') {
       const body = await req.json() as any
       const result = linkExistingProject({
         projectDir: body.projectDir,
         account: body.account,
-        template: body.template ?? 'eva',
         ownerJid: body.ownerJid,
       })
       return json(result, result.ok ? 200 : 400)
