@@ -82,6 +82,8 @@ type Tunables = {
   length_factor_short: number
   length_factor_medium: number
   length_factor_long: number
+  allowed_tools: string[]
+  disallowed_tools: string[]
   dry_run: boolean
 }
 function tunables(): Tunables {
@@ -101,8 +103,22 @@ function tunables(): Tunables {
     length_factor_short:  stored.length_factor_short  ?? 0.5,
     length_factor_medium: stored.length_factor_medium ?? 1.0,
     length_factor_long:   stored.length_factor_long   ?? 1.6,
+    allowed_tools:   Array.isArray(stored.allowed_tools)   ? stored.allowed_tools   : [],
+    disallowed_tools: Array.isArray(stored.disallowed_tools) ? stored.disallowed_tools : [],
     dry_run: process.env.CC_WHATSAPP_DRY_RUN === '1',
   }
+}
+
+// ─── Extra per-project MCP servers (merged into MCP_JSON each turn) ─────────
+const EXTRA_MCPS_FILE = join(STATE_DIR, 'extra_mcps.json')
+function loadExtraMcps(): Record<string, any> {
+  try {
+    const obj = JSON.parse(readFileSync(EXTRA_MCPS_FILE, 'utf8'))
+    if (obj && typeof obj === 'object' && obj.mcpServers && typeof obj.mcpServers === 'object') {
+      return obj.mcpServers
+    }
+  } catch {}
+  return {}
 }
 // Legacy aliases (referenced elsewhere; resolve fresh each call)
 const DRY_RUN = process.env.CC_WHATSAPP_DRY_RUN === '1'
@@ -339,14 +355,19 @@ function stopTyping(jid: string): void {
   spawn(WACLI_BIN, ['--account', WACLI_ACCOUNT, 'presence', 'paused', '--to', jid], { stdio: 'ignore' }).on('error', () => {})
 }
 
-const MCP_JSON = JSON.stringify({
-  mcpServers: {
+// Build MCP_JSON dynamically each turn so extra_mcps.json edits go live.
+function buildMcpJson(): string {
+  const base: Record<string, any> = {
     whatsapp: {
       command: 'bun',
       args: [SERVER_FILE],
     },
-  },
-})
+  }
+  const extras = loadExtraMcps()
+  // user-defined MCPs cannot override our whatsapp server
+  const { whatsapp: _ignore, ...userExtras } = extras
+  return JSON.stringify({ mcpServers: { ...base, ...userExtras } })
+}
 
 // Spawn `claude -p` to handle one inbound message. Fires WhatsApp typing
 // indicator continuously while claude works, stops on exit.
@@ -489,17 +510,22 @@ async function triggerClaude(jid: string): Promise<void> {
 function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startMs: number, onExit: () => void): void {
   const sess = getOrCreateSession(jid)
   const sessFlag = sess.isNew ? ['--session-id', sess.uuid] : ['--resume', sess.uuid]
+  const t = tunables()
+  const toolFlags: string[] = []
+  if (t.allowed_tools.length > 0) toolFlags.push('--allowedTools', t.allowed_tools.join(','))
+  if (t.disallowed_tools.length > 0) toolFlags.push('--disallowedTools', t.disallowed_tools.join(','))
   const args = [
     '-p',
-    '--model', tunables().chat_model,
-    '--mcp-config', MCP_JSON,
+    '--model', t.chat_model,
+    '--mcp-config', buildMcpJson(),
     '--dangerously-skip-permissions',
     '--strict-mcp-config',
     '--append-system-prompt', PERSONA_PROMPT,
+    ...toolFlags,
     ...sessFlag,
     prompt,
   ]
-  trace('claude_spawn', { jid, sessId: sess.uuid, sessNew: sess.isNew, model: tunables().chat_model, promptLen: prompt.length, turnId })
+  trace('claude_spawn', { jid, sessId: sess.uuid, sessNew: sess.isNew, model: t.chat_model, promptLen: prompt.length, turnId, toolFlags })
 
   const heartbeat = startTyping(jid)
   const child = spawn(CLAUDE_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] })

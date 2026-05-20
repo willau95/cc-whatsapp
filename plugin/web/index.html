@@ -11,6 +11,7 @@
     }
   </script>
   <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
   <link rel="stylesheet" href="/assets/styles.css" />
 </head>
 <body class="bg-zinc-950 text-zinc-100 antialiased" x-data="app()" x-init="init()" x-cloak>
@@ -23,71 +24,47 @@
     <span class="text-xs text-zinc-500">· v0.1.0</span>
   </div>
 
-  <!-- Project switcher -->
-  <div class="relative" x-show="projects.length > 0">
+  <!-- Project switcher (only when multiple projects) -->
+  <div class="relative" x-show="projects.length > 0 && selected">
     <select x-model="selectedId" @change="select($event.target.value)"
             class="bg-zinc-900 border border-zinc-700 rounded-md px-3 py-1.5 text-sm font-mono focus:border-brand-500 outline-none">
       <template x-for="p in projects" :key="p.id">
-        <option :value="p.id" x-text="p.name + ' · ' + p.account"></option>
+        <option :value="p.id" x-text="p.name + ' · ' + p.account + (p.paired ? '' : ' · unpaired')"></option>
       </template>
     </select>
   </div>
 
-  <!-- Status pill -->
   <div x-show="selected" class="flex items-center gap-2 text-xs">
     <span :class="selected?.routerAlive ? 'text-emerald-400' : 'text-zinc-500'">●</span>
-    <span x-text="selected?.routerAlive ? 'online' : 'offline'"></span>
+    <span x-text="selected?.routerAlive ? 'router online' : (selected?.paired ? 'router stopped' : 'not paired')"></span>
   </div>
 
   <div class="flex-1"></div>
 
   <button @click="refresh()" class="text-xs px-3 py-1.5 rounded border border-zinc-700 hover:bg-zinc-800">↻ Refresh</button>
 
-  <button x-show="selected && !selected.routerAlive" @click="startRouter()"
+  <button x-show="selected && selected.paired && !selected.routerAlive" @click="startRouter()"
           class="text-xs px-3 py-1.5 rounded bg-brand-600 hover:bg-brand-500 text-white">▶ Start router</button>
   <button x-show="selected && selected.routerAlive" @click="stopRouter()"
           class="text-xs px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-white">■ Stop</button>
 </header>
 
-<!-- ──────────────────── EMPTY STATE ──────────────────── -->
-<template x-if="projects.length === 0">
-  <div class="m-12 max-w-2xl mx-auto bg-zinc-900 border border-zinc-800 rounded-xl p-8">
-    <div class="text-3xl mb-2">👋</div>
-    <h2 class="text-xl font-bold mb-2">No bots yet</h2>
-    <p class="text-zinc-400 text-sm mb-6">
-      cc-whatsapp finds bots by scanning <code class="text-emerald-400">~/Projects/*/.claude/cc-whatsapp/</code> and similar.
-      To create your first bot, run these commands in a terminal:
-    </p>
-    <pre class="bg-zinc-950 border border-zinc-800 rounded p-4 text-xs font-mono leading-relaxed overflow-x-auto"><span class="text-zinc-500"># 1. Go to (or create) a project folder</span>
-mkdir -p ~/Projects/my-bot && cd ~/Projects/my-bot
-
-<span class="text-zinc-500"># 2. Open Claude Code with the plugin loaded</span>
-claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
-
-<span class="text-zinc-500"># 3. Inside Claude Code, run:</span>
-/cc-whatsapp:init       <span class="text-zinc-500"># pick account name, copies persona templates</span>
-/cc-whatsapp:pair       <span class="text-zinc-500"># scan QR to link a WhatsApp number</span>
-/cc-whatsapp:start      <span class="text-zinc-500"># launch router</span>
-
-<span class="text-zinc-500"># 4. Come back here and hit ↻ Refresh</span></pre>
-    <p class="text-xs text-zinc-500 mt-6">
-      Coming soon: <span class="text-zinc-400">create + pair from this dashboard directly</span>.
-    </p>
-  </div>
-</template>
-
 <!-- ──────────────────── MAIN LAYOUT ──────────────────── -->
-<div x-show="selected" class="flex" style="height: calc(100vh - 3.5rem);">
+<div class="flex" style="height: calc(100vh - 3.5rem);">
 
-  <!-- Left nav -->
-  <nav class="w-56 border-r border-zinc-800 overflow-y-auto py-3">
+  <!-- Left nav (always visible) -->
+  <nav class="w-56 border-r border-zinc-800 overflow-y-auto py-3 shrink-0">
     <template x-for="t in tabs" :key="t.id">
       <button @click="switchTab(t.id)"
-              :class="activeTab === t.id ? 'bg-zinc-800 text-emerald-400 border-l-2 border-emerald-400' : 'hover:bg-zinc-900 border-l-2 border-transparent'"
+              :disabled="t.needsProject && !selected"
+              :class="[
+                activeTab === t.id ? 'bg-zinc-800 text-emerald-400 border-l-2 border-emerald-400' : 'hover:bg-zinc-900 border-l-2 border-transparent',
+                (t.needsProject && !selected) ? 'opacity-40 cursor-not-allowed' : ''
+              ]"
               class="w-full px-4 py-2.5 text-left text-sm flex items-center gap-3">
         <span class="text-lg" x-text="t.icon"></span>
         <span x-text="t.label"></span>
-        <span x-show="t.dirty()" class="ml-auto text-xs text-amber-400">●</span>
+        <span x-show="isTabDirty(t.id)" class="ml-auto text-xs text-amber-400">●</span>
       </button>
     </template>
   </nav>
@@ -97,21 +74,78 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
 
     <div class="flex-1 overflow-y-auto">
 
+      <!-- ─────── PROJECTS (landing — always available) ─────── -->
+      <section x-show="activeTab === 'projects'" class="p-8 max-w-6xl mx-auto">
+        <h2 class="text-2xl font-bold mb-1">All bots on this machine</h2>
+        <p class="text-sm text-zinc-400 mb-6">
+          cc-whatsapp scans <code class="text-emerald-400">~/Projects/*/.claude/cc-whatsapp/</code> and <code class="text-emerald-400">~/.claude/cc-whatsapp/</code> for existing bots. Click one to manage it, or create a new one from scratch.
+        </p>
+
+        <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+          <!-- Create new bot -->
+          <button @click="openWizard()"
+                  class="bg-emerald-900/20 border-2 border-dashed border-emerald-700 rounded-xl p-6 hover:border-emerald-500 hover:bg-emerald-900/30 transition text-left">
+            <div class="text-3xl mb-2">➕</div>
+            <div class="font-bold text-emerald-300">Create new bot</div>
+            <div class="text-xs text-zinc-400 mt-1">New folder → init files → scan WhatsApp QR → ready</div>
+          </button>
+
+          <!-- Existing projects -->
+          <template x-for="p in projects" :key="p.id">
+            <button @click="select(p.id); activeTab = 'overview'"
+                    class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 hover:border-emerald-600 hover:bg-zinc-800/50 text-left">
+              <div class="flex items-start gap-3">
+                <div class="text-2xl shrink-0" x-text="p.routerAlive ? '🟢' : (p.paired ? '⚪' : '🟠')"></div>
+                <div class="min-w-0 flex-1">
+                  <div class="font-bold truncate" x-text="p.name"></div>
+                  <div class="text-xs text-zinc-500 font-mono truncate" x-text="p.account + ' · ' + p.path"></div>
+                  <div class="mt-3 flex gap-3 text-xs text-zinc-400">
+                    <span x-text="p.allowFrom.length + ' allowed'"></span>
+                    <span x-text="p.contactCount + ' contacts'"></span>
+                  </div>
+                  <div class="mt-2 flex gap-1.5">
+                    <span x-show="!p.paired" class="text-xs bg-amber-900/40 text-amber-300 px-2 py-0.5 rounded">needs pair</span>
+                    <span x-show="p.paired && !p.routerAlive" class="text-xs bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded">stopped</span>
+                    <span x-show="p.routerAlive" class="text-xs bg-emerald-900/40 text-emerald-300 px-2 py-0.5 rounded">live</span>
+                    <span x-show="p.disabled" class="text-xs bg-red-900/40 text-red-300 px-2 py-0.5 rounded">kill switch</span>
+                  </div>
+                </div>
+              </div>
+            </button>
+          </template>
+        </div>
+
+        <div x-show="projects.length === 0" class="mt-8 bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-sm text-zinc-400 max-w-3xl">
+          <p class="font-bold text-zinc-200 mb-2">👋 No bots yet</p>
+          <p>Click <strong class="text-emerald-300">Create new bot</strong> above to set one up end-to-end — pick a name, scan QR, choose a persona, done. Takes ~2 minutes.</p>
+        </div>
+      </section>
+
       <!-- ─────── OVERVIEW ─────── -->
-      <section x-show="activeTab === 'overview'" class="p-8 max-w-5xl mx-auto">
+      <section x-show="activeTab === 'overview' && selected" class="p-8 max-w-5xl mx-auto">
         <h2 class="text-2xl font-bold mb-1" x-text="selected?.name"></h2>
         <p class="text-zinc-500 text-sm font-mono mb-6" x-text="selected?.path"></p>
+
+        <!-- Unpaired warning -->
+        <div x-show="selected && !selected.paired" class="mb-6 bg-amber-900/20 border border-amber-700/40 rounded-xl p-5 flex items-center gap-4">
+          <div class="text-3xl">📱</div>
+          <div class="flex-1">
+            <div class="font-bold text-amber-300">WhatsApp not linked yet</div>
+            <div class="text-sm text-zinc-300">This bot won't receive messages until you pair its account with a WhatsApp number.</div>
+          </div>
+          <button @click="openPair()" class="text-sm px-4 py-2 rounded bg-amber-700 hover:bg-amber-600 text-white">📲 Pair WhatsApp</button>
+        </div>
 
         <div class="grid grid-cols-3 gap-4 mb-8">
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
             <div class="text-xs text-zinc-500 mb-1">Account</div>
             <div class="font-mono text-lg" x-text="selected?.account ?? '—'"></div>
-            <div class="text-xs text-zinc-500 mt-1">WhatsApp identity bound to this bot</div>
+            <div class="text-xs text-zinc-500 mt-1" x-text="selected?.paired ? 'paired ✓' : 'NOT paired'"></div>
           </div>
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
             <div class="text-xs text-zinc-500 mb-1">Allowed contacts</div>
             <div class="font-mono text-lg" x-text="(selected?.allowFrom?.length ?? 0) + ' allowed'"></div>
-            <div class="text-xs text-zinc-500 mt-1" x-text="selected?.contactCount + ' have memory files'"></div>
+            <div class="text-xs text-zinc-500 mt-1" x-text="(selected?.contactCount ?? 0) + ' have memory files'"></div>
           </div>
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
             <div class="text-xs text-zinc-500 mb-1">Router process</div>
@@ -149,8 +183,8 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
       </section>
 
       <!-- ─────── CHATS ─────── -->
-      <section x-show="activeTab === 'chats'" class="flex h-full">
-        <aside class="w-80 border-r border-zinc-800 overflow-y-auto">
+      <section x-show="activeTab === 'chats' && selected" class="flex h-full">
+        <aside class="w-80 border-r border-zinc-800 overflow-y-auto shrink-0">
           <div class="px-4 py-3 border-b border-zinc-800 text-xs text-zinc-500 uppercase tracking-wider">
             Conversations · <span x-text="conversations.length"></span>
           </div>
@@ -194,8 +228,7 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
                   <div class="text-xs text-zinc-500 font-mono" x-text="activeChat"></div>
                 </div>
                 <div class="flex-1"></div>
-                <button x-show="conversations.find(c=>c.jid===activeChat)?.contactFileExists"
-                        @click="openContactFile(activeChat)"
+                <button @click="openContactFile(activeChat)"
                         class="text-xs px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800">
                   📝 contact memory
                 </button>
@@ -221,22 +254,28 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
       </section>
 
       <!-- ─────── PERSONA ─────── -->
-      <section x-show="activeTab === 'persona'" class="flex h-full">
-        <aside class="w-48 border-r border-zinc-800 py-2">
+      <section x-show="activeTab === 'persona' && selected" class="flex h-full">
+        <aside class="w-56 border-r border-zinc-800 py-2 shrink-0">
           <div class="px-4 py-2 text-xs text-zinc-500 uppercase tracking-wider">Persona files</div>
           <template x-for="name in personaNames" :key="name">
             <button @click="switchPersonaFile(name)"
                     :class="activePersonaFile === name ? 'bg-zinc-800 text-emerald-400' : 'hover:bg-zinc-900'"
                     class="w-full text-left px-4 py-2 text-sm font-mono flex items-center gap-2">
               <span x-text="name"></span>
-              <span x-show="personaDirty[name]" class="text-amber-400 text-xs">●</span>
+              <span x-show="personaDirty[name]" class="text-amber-400 text-xs ml-auto">●</span>
             </button>
           </template>
-          <div class="px-4 py-3 mt-2 text-xs text-zinc-500 leading-relaxed border-t border-zinc-800">
-            These markdown files get concatenated into Claude's system prompt every turn. Edit them to change the bot's behavior.
+          <div class="px-4 py-3 mt-2 border-t border-zinc-800">
+            <button @click="showApplyTemplate = true"
+                    class="text-xs text-emerald-400 hover:text-emerald-300">
+              🎨 Apply persona template…
+            </button>
+            <p class="text-xs text-zinc-600 mt-3 leading-relaxed">
+              These markdown files get concatenated into Claude's system prompt every turn. Edit them to change the bot's behavior.
+            </p>
           </div>
         </aside>
-        <div class="flex-1 flex flex-col">
+        <div class="flex-1 flex flex-col min-w-0">
           <div class="px-6 py-3 border-b border-zinc-800 text-xs text-zinc-500 flex items-center gap-2">
             <span class="font-mono" x-text="activePersonaFile"></span>
             <span class="text-zinc-700">·</span>
@@ -246,13 +285,13 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
                     @input="markPersonaDirty()"
                     @keydown.meta.s.prevent="savePersona()"
                     @keydown.ctrl.s.prevent="savePersona()"
-                    class="flex-1 bg-zinc-950 p-6 text-sm font-mono leading-relaxed outline-none whitespace-pre resize-none"
+                    class="flex-1 bg-zinc-950 p-6 text-sm font-mono leading-relaxed outline-none whitespace-pre-wrap resize-none"
                     spellcheck="false"></textarea>
         </div>
       </section>
 
       <!-- ─────── TUNABLES ─────── -->
-      <section x-show="activeTab === 'tunables'" class="p-8 max-w-3xl mx-auto">
+      <section x-show="activeTab === 'tunables' && selected" class="p-8 max-w-3xl mx-auto">
         <div class="mb-6">
           <h2 class="text-xl font-bold mb-1">Tunables</h2>
           <p class="text-sm text-zinc-400">
@@ -260,7 +299,6 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
           </p>
         </div>
 
-        <!-- Presets -->
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 mb-6">
           <div class="text-xs font-bold uppercase tracking-wider text-zinc-400 mb-3">Quick presets</div>
           <div class="grid grid-cols-2 gap-2">
@@ -274,7 +312,6 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
           </div>
         </div>
 
-        <!-- Categories -->
         <template x-for="(group, idx) in tunablesGroups" :key="idx">
           <div class="mb-6">
             <h3 class="text-sm font-bold uppercase tracking-wider text-zinc-400 mb-3" x-text="group.title"></h3>
@@ -286,12 +323,11 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
                       <div class="text-sm font-mono" x-text="tunablesMeta[key]?.label || key"></div>
                       <div class="text-xs text-zinc-500 mt-1" x-text="tunablesMeta[key]?.help"></div>
                     </div>
-                    <button x-show="tunablesDraft[key] !== tunablesMeta[key]?.default"
+                    <button x-show="tunablesDraft[key] !== tunablesMeta[key]?.default && tunablesMeta[key]?.type !== 'array'"
                             @click="tunablesDraft[key] = tunablesMeta[key].default; markTunablesDirty()"
                             class="text-xs text-zinc-500 hover:text-zinc-200 shrink-0 ml-4">↺ reset</button>
                   </div>
 
-                  <!-- Slider for numbers -->
                   <template x-if="tunablesMeta[key]?.type === 'number'">
                     <div class="space-y-2">
                       <div class="flex items-center gap-4">
@@ -309,7 +345,6 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
                     </div>
                   </template>
 
-                  <!-- Boolean toggle -->
                   <template x-if="tunablesMeta[key]?.type === 'boolean'">
                     <label class="flex items-center gap-3 cursor-pointer">
                       <input type="checkbox" x-model="tunablesDraft[key]" @change="markTunablesDirty()" class="w-4 h-4">
@@ -317,7 +352,6 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
                     </label>
                   </template>
 
-                  <!-- Text -->
                   <template x-if="tunablesMeta[key]?.type === 'text'">
                     <input type="text" x-model="tunablesDraft[key]" @input="markTunablesDirty()"
                            class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
@@ -330,7 +364,7 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
       </section>
 
       <!-- ─────── PRODUCTION ─────── -->
-      <section x-show="activeTab === 'production'" class="p-8 max-w-6xl mx-auto">
+      <section x-show="activeTab === 'production' && selected" class="p-8 max-w-6xl mx-auto">
         <div class="mb-6">
           <h2 class="text-xl font-bold mb-1">Production deep-dive</h2>
           <p class="text-sm text-zinc-400">
@@ -340,9 +374,8 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
 
         <div class="grid grid-cols-3 gap-4 mb-6">
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-            <div class="text-xs text-zinc-500">Last 24h</div>
+            <div class="text-xs text-zinc-500">Total turns</div>
             <div class="text-2xl font-bold" x-text="turns.length"></div>
-            <div class="text-xs text-zinc-500">turns</div>
           </div>
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
             <div class="text-xs text-zinc-500">Avg duration</div>
@@ -394,7 +427,7 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
       </section>
 
       <!-- ─────── ACCESS ─────── -->
-      <section x-show="activeTab === 'access'" class="p-8 max-w-3xl mx-auto">
+      <section x-show="activeTab === 'access' && selected" class="p-8 max-w-3xl mx-auto">
         <div class="mb-6">
           <h2 class="text-xl font-bold mb-1">Who can message the bot</h2>
           <p class="text-sm text-zinc-400">
@@ -435,27 +468,106 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
         </p>
       </section>
 
-      <!-- ─────── SETTINGS ─────── -->
-      <section x-show="activeTab === 'settings'" class="p-8 max-w-3xl mx-auto">
-        <h2 class="text-xl font-bold mb-1">Settings</h2>
-        <p class="text-sm text-zinc-400 mb-6">Read-only metadata about this project. Edit by modifying the config files directly.</p>
+      <!-- ─────── MCP & TOOLS ─────── -->
+      <section x-show="activeTab === 'mcp-tools' && selected" class="p-8 max-w-3xl mx-auto">
+        <div class="mb-6">
+          <h2 class="text-xl font-bold mb-1">MCP servers & allowed tools</h2>
+          <p class="text-sm text-zinc-400">
+            Control what your bot's Claude can DO. Restrict to safe tools, or add extra MCP servers (calendar, database, your own).
+          </p>
+        </div>
 
-        <dl class="space-y-3">
+        <h3 class="text-sm font-bold uppercase tracking-wider text-zinc-400 mb-3">Allowed tools (Claude Code built-in)</h3>
+        <p class="text-xs text-zinc-500 mb-3">Empty = all tools allowed (default). Selecting any tools enforces an allowlist via <code>--allowedTools</code>.</p>
+        <div class="grid grid-cols-3 gap-2 mb-6">
+          <template x-for="tool in availableTools" :key="tool">
+            <label class="flex items-center gap-2 bg-zinc-900 border border-zinc-800 rounded-lg p-3 cursor-pointer hover:bg-zinc-800">
+              <input type="checkbox"
+                     :checked="(tunablesDraft.allowed_tools || []).includes(tool)"
+                     @change="toggleAllowedTool(tool)"
+                     class="w-4 h-4">
+              <span class="text-sm font-mono" x-text="tool"></span>
+            </label>
+          </template>
+        </div>
+
+        <h3 class="text-sm font-bold uppercase tracking-wider text-zinc-400 mb-3">Extra MCP servers</h3>
+        <p class="text-xs text-zinc-500 mb-3">Merged into Claude's MCP config every turn. Cannot override the built-in <code>whatsapp</code> server.</p>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden mb-4">
+          <div class="px-4 py-2 bg-zinc-950 text-xs text-zinc-500 uppercase tracking-wider flex items-center">
+            <span>Servers · <span x-text="Object.keys(extraMcpsDraft.mcpServers || {}).length"></span></span>
+          </div>
+          <template x-for="(server, name) in extraMcpsDraft.mcpServers" :key="name">
+            <div class="px-4 py-3 border-t border-zinc-800 flex items-start gap-3">
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-mono font-bold" x-text="name"></div>
+                <div class="text-xs text-zinc-500 font-mono truncate" x-text="(server.command || '?') + ' ' + (server.args || []).join(' ')"></div>
+              </div>
+              <button @click="removeMcpServer(name)" class="text-xs text-red-400 hover:text-red-300 shrink-0">✕ remove</button>
+            </div>
+          </template>
+          <div x-show="Object.keys(extraMcpsDraft.mcpServers || {}).length === 0" class="px-4 py-6 text-center text-zinc-500 text-sm">
+            No extra MCP servers configured.
+          </div>
+        </div>
+
+        <form @submit.prevent="addMcpServer()" class="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-3">
+          <div class="text-xs font-bold uppercase tracking-wider text-zinc-400">Add MCP server</div>
+          <input x-model="newMcp.name" placeholder="name (e.g. calendar, db)"
+                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+          <input x-model="newMcp.command" placeholder="command (e.g. npx, bun, python)"
+                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+          <input x-model="newMcp.args" placeholder="args (space-separated, e.g. @some/mcp-server-package)"
+                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+          <button class="px-4 py-2 rounded bg-brand-600 hover:bg-brand-500 text-white text-sm">+ Add MCP server</button>
+        </form>
+      </section>
+
+      <!-- ─────── SETTINGS ─────── -->
+      <section x-show="activeTab === 'settings' && selected" class="p-8 max-w-3xl mx-auto">
+        <h2 class="text-xl font-bold mb-1">Settings</h2>
+        <p class="text-sm text-zinc-400 mb-6">Project metadata + danger zone.</p>
+
+        <dl class="space-y-3 mb-8">
           <template x-for="row in settingsRows" :key="row.label">
             <div class="flex gap-4 py-2 border-b border-zinc-800">
-              <dt class="w-40 text-xs text-zinc-500" x-text="row.label"></dt>
+              <dt class="w-48 text-xs text-zinc-500" x-text="row.label"></dt>
               <dd class="text-sm font-mono break-all" x-text="row.value"></dd>
             </div>
           </template>
         </dl>
+
+        <h3 class="text-sm font-bold uppercase tracking-wider text-red-400 mb-3">Danger zone</h3>
+        <div class="bg-red-900/20 border border-red-700/40 rounded-xl p-5 space-y-3">
+          <div>
+            <div class="text-sm font-bold mb-1">Re-pair WhatsApp</div>
+            <p class="text-xs text-zinc-400 mb-2">Useful if the link expired or you logged out from phone.</p>
+            <button @click="openPair()" class="text-sm px-3 py-1.5 rounded bg-amber-700 hover:bg-amber-600 text-white">📲 Pair again</button>
+          </div>
+          <div class="border-t border-red-700/30 pt-3">
+            <div class="text-sm font-bold mb-1">Delete this bot's config</div>
+            <p class="text-xs text-zinc-400 mb-2">Wipes <code class="text-zinc-300" x-text="selected?.path + '/.claude/cc-whatsapp/'"></code>. Leaves the project folder. CANNOT BE UNDONE.</p>
+            <button @click="deleteProject()" class="text-sm px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-white">🗑 Delete config</button>
+          </div>
+        </div>
       </section>
+
+      <!-- ─────── EMPTY-PROJECT FALLBACK for tabs that need a project ─────── -->
+      <template x-for="t in tabs" :key="'empty-'+t.id">
+        <section x-show="activeTab === t.id && t.needsProject && !selected" class="p-12 text-center">
+          <div class="text-3xl mb-2">📂</div>
+          <p class="text-zinc-400 mb-4">Pick a project from <strong>Projects</strong> first.</p>
+          <button @click="activeTab = 'projects'" class="text-sm px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white">← Go to Projects</button>
+        </section>
+      </template>
 
     </div>
 
     <!-- ─────── STICKY SAVE BAR ─────── -->
     <div x-show="isDirty()"
          x-transition.opacity
-         class="border-t border-amber-700/30 bg-amber-900/20 px-6 py-3 flex items-center gap-4">
+         class="border-t border-amber-700/30 bg-amber-900/20 px-6 py-3 flex items-center gap-4 shrink-0">
       <span class="text-amber-400 text-sm">●</span>
       <span class="text-sm" x-text="dirtySummary()"></span>
       <div class="flex-1"></div>
@@ -469,7 +581,7 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
 <!-- ─────── TURN INSPECTOR (drawer) ─────── -->
 <div x-show="turnDetail" x-transition.opacity
      class="fixed inset-0 bg-black/60 z-40 flex justify-end" @click.self="turnDetail = null">
-  <div x-show="turnDetail" x-transition.translate
+  <div x-show="turnDetail" x-transition
        class="bg-zinc-950 border-l border-zinc-800 w-full max-w-4xl h-full overflow-y-auto">
     <header class="sticky top-0 bg-zinc-950 border-b border-zinc-800 px-6 py-3 flex items-center gap-4">
       <h3 class="font-mono text-sm" x-text="turnDetail?.turnId"></h3>
@@ -505,6 +617,200 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
   </div>
 </div>
 
+<!-- ─────── CONTACT MEMORY EDITOR (drawer) ─────── -->
+<div x-show="contactEditor.open" x-transition.opacity
+     class="fixed inset-0 bg-black/60 z-40 flex justify-end" @click.self="closeContactEditor()">
+  <div x-show="contactEditor.open" x-transition
+       class="bg-zinc-950 border-l border-zinc-800 w-full max-w-3xl h-full flex flex-col">
+    <header class="border-b border-zinc-800 px-6 py-3 flex items-center gap-4">
+      <h3 class="font-mono text-sm">📝 contacts/<span x-text="contactEditor.jid"></span>.md</h3>
+      <span x-show="contactEditor.draft !== contactEditor.saved" class="text-xs text-amber-400">● unsaved</span>
+      <div class="flex-1"></div>
+      <button @click="saveContactEditor()" class="text-xs px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white">💾 Save</button>
+      <button @click="closeContactEditor()" class="text-xs px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800">✕ close</button>
+    </header>
+    <textarea x-model="contactEditor.draft"
+              @keydown.meta.s.prevent="saveContactEditor()"
+              @keydown.ctrl.s.prevent="saveContactEditor()"
+              class="flex-1 bg-zinc-950 p-6 text-sm font-mono leading-relaxed outline-none whitespace-pre-wrap resize-none"
+              spellcheck="false"
+              placeholder="(empty — write things to remember about this contact)"></textarea>
+  </div>
+</div>
+
+<!-- ─────── NEW PROJECT WIZARD ─────── -->
+<div x-show="wizard.open" x-transition.opacity
+     class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" @click.self="closeWizard()">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-2xl flex flex-col" style="max-height: 90vh;">
+    <header class="border-b border-zinc-800 px-6 py-4 flex items-center gap-4">
+      <h3 class="text-lg font-bold">
+        <span x-show="wizard.step === 1">Step 1 of 4 · Name your bot</span>
+        <span x-show="wizard.step === 2">Step 2 of 4 · Pick a persona</span>
+        <span x-show="wizard.step === 3">Step 3 of 4 · Link a WhatsApp number</span>
+        <span x-show="wizard.step === 4">Step 4 of 4 · Done!</span>
+      </h3>
+      <div class="flex-1"></div>
+      <div class="flex gap-1">
+        <template x-for="n in 4" :key="n">
+          <div :class="n <= wizard.step ? 'bg-emerald-500' : 'bg-zinc-700'" class="w-8 h-1 rounded"></div>
+        </template>
+      </div>
+      <button @click="closeWizard()" class="text-zinc-500 hover:text-zinc-200 text-xl leading-none">×</button>
+    </header>
+
+    <div class="flex-1 overflow-y-auto p-6">
+
+      <!-- Step 1: Name + parent dir -->
+      <div x-show="wizard.step === 1" class="space-y-4">
+        <div>
+          <label class="text-sm font-medium block mb-1">Bot name</label>
+          <input x-model="wizard.name" type="text" placeholder="my-bot"
+                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono"
+                 @input="wizard.account = wizard.name">
+          <p class="text-xs text-zinc-500 mt-1">a-z 0-9 _ - · max 40 chars · creates folder with this name</p>
+        </div>
+        <div>
+          <label class="text-sm font-medium block mb-1">Parent directory</label>
+          <input x-model="wizard.parentDir" type="text"
+                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+          <p class="text-xs text-zinc-500 mt-1">where to create the folder · <code x-text="wizard.parentDir + '/' + wizard.name"></code></p>
+        </div>
+        <div>
+          <label class="text-sm font-medium block mb-1">wacli account name</label>
+          <input x-model="wizard.account" type="text"
+                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+          <p class="text-xs text-zinc-500 mt-1">internal identifier for the WhatsApp number — usually same as bot name</p>
+        </div>
+        <p x-show="wizard.error" class="text-sm text-red-400 mt-2" x-text="wizard.error"></p>
+      </div>
+
+      <!-- Step 2: Persona pick -->
+      <div x-show="wizard.step === 2" class="space-y-3">
+        <p class="text-sm text-zinc-400 mb-4">Pick a starting personality. You can edit all the .md files freely after this.</p>
+        <template x-for="t in availableTemplates" :key="t.id">
+          <button @click="wizard.template = t.id"
+                  :class="wizard.template === t.id ? 'border-emerald-500 bg-emerald-900/20' : 'border-zinc-700 hover:bg-zinc-800'"
+                  class="w-full text-left border rounded-xl p-4 flex gap-3 items-start">
+            <div class="text-2xl shrink-0" x-text="t.icon"></div>
+            <div class="flex-1">
+              <div class="font-bold" x-text="t.label"></div>
+              <div class="text-xs text-zinc-400 mt-1" x-text="t.description"></div>
+            </div>
+            <div x-show="wizard.template === t.id" class="text-emerald-400 text-xl">✓</div>
+          </button>
+        </template>
+      </div>
+
+      <!-- Step 3: QR pairing -->
+      <div x-show="wizard.step === 3" class="space-y-4">
+        <p class="text-sm text-zinc-400">
+          Scan this QR with WhatsApp → ⚙️ Settings → Linked Devices → Link a Device.
+        </p>
+        <div class="flex justify-center bg-white p-6 rounded-xl">
+          <canvas x-ref="wizardQrCanvas" width="280" height="280"></canvas>
+        </div>
+        <div class="text-center text-sm">
+          <div x-show="wizard.pairStatus === 'starting'" class="text-zinc-400">⏳ generating QR…</div>
+          <div x-show="wizard.pairStatus === 'qr'" class="text-amber-400">📱 waiting for scan…</div>
+          <div x-show="wizard.pairStatus === 'paired'" class="text-emerald-400">✓ WhatsApp linked!</div>
+          <div x-show="wizard.pairStatus === 'error'" class="text-red-400" x-text="'❌ ' + wizard.pairError"></div>
+          <div x-show="wizard.pairStatus === 'timeout'" class="text-red-400">⏱ pairing timed out</div>
+        </div>
+        <div x-show="wizard.pairStatus === 'qr'" class="text-xs text-zinc-500 text-center">
+          QR rotates every ~20s — page auto-updates
+        </div>
+      </div>
+
+      <!-- Step 4: Done -->
+      <div x-show="wizard.step === 4" class="text-center py-8">
+        <div class="text-5xl mb-4">🎉</div>
+        <p class="text-lg font-bold mb-2">Your bot is set up</p>
+        <p class="text-sm text-zinc-400 mb-6">
+          Project at <code class="text-emerald-300" x-text="wizard.parentDir + '/' + wizard.name"></code>
+        </p>
+        <p class="text-xs text-zinc-500 max-w-md mx-auto">
+          Next: open the bot, allowlist whoever should be able to message it (from the <strong>Access</strong> tab), then click <strong>▶ Start router</strong> at the top.
+        </p>
+      </div>
+
+    </div>
+
+    <footer class="border-t border-zinc-800 px-6 py-3 flex items-center gap-3">
+      <button x-show="wizard.step > 1 && wizard.step < 4"
+              @click="wizard.step--"
+              class="text-sm px-4 py-2 rounded border border-zinc-700 hover:bg-zinc-800">← Back</button>
+      <div class="flex-1"></div>
+      <button x-show="wizard.step === 1" @click="wizardStep1Next()"
+              :disabled="!wizard.name || wizard.busy"
+              class="text-sm px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white disabled:bg-zinc-700 disabled:cursor-not-allowed"
+              x-text="wizard.busy ? 'Creating…' : 'Next →'"></button>
+      <button x-show="wizard.step === 2" @click="wizardStep2Next()"
+              :disabled="!wizard.template || wizard.busy"
+              class="text-sm px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white disabled:bg-zinc-700"
+              x-text="wizard.busy ? 'Working…' : (wizard.pairAlreadyDone ? 'Finish →' : 'Pair WhatsApp →')"></button>
+      <button x-show="wizard.step === 3 && wizard.pairStatus === 'paired'"
+              @click="wizard.step = 4"
+              class="text-sm px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white">Continue →</button>
+      <button x-show="wizard.step === 3 && wizard.pairStatus === 'error'"
+              @click="wizardRetryPair()"
+              class="text-sm px-4 py-2 rounded bg-amber-600 hover:bg-amber-500 text-white">↻ Retry</button>
+      <button x-show="wizard.step === 4" @click="closeWizard()"
+              class="text-sm px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white">Open bot ✓</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ─────── PAIR MODAL (re-pair from settings/overview) ─────── -->
+<div x-show="pairModal.open" x-transition.opacity
+     class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" @click.self="closePair()">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-md flex flex-col">
+    <header class="border-b border-zinc-800 px-6 py-4 flex items-center gap-4">
+      <h3 class="text-lg font-bold">📲 Link WhatsApp number</h3>
+      <div class="flex-1"></div>
+      <button @click="closePair()" class="text-zinc-500 hover:text-zinc-200 text-xl leading-none">×</button>
+    </header>
+    <div class="p-6 space-y-4">
+      <p class="text-sm text-zinc-400">Scan with WhatsApp → ⚙️ Settings → Linked Devices → Link a Device.</p>
+      <div class="flex justify-center bg-white p-6 rounded-xl">
+        <canvas x-ref="pairQrCanvas" width="280" height="280"></canvas>
+      </div>
+      <div class="text-center text-sm">
+        <div x-show="pairModal.status === 'starting'" class="text-zinc-400">⏳ generating QR…</div>
+        <div x-show="pairModal.status === 'qr'" class="text-amber-400">📱 waiting for scan…</div>
+        <div x-show="pairModal.status === 'paired'" class="text-emerald-400">✓ Linked! You can close this.</div>
+        <div x-show="pairModal.status === 'error'" class="text-red-400" x-text="'❌ ' + pairModal.error"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─────── APPLY-TEMPLATE MODAL ─────── -->
+<div x-show="showApplyTemplate" x-transition.opacity
+     class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" @click.self="showApplyTemplate = false">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-2xl">
+    <header class="border-b border-zinc-800 px-6 py-4 flex items-center gap-4">
+      <h3 class="text-lg font-bold">🎨 Apply persona template</h3>
+      <div class="flex-1"></div>
+      <button @click="showApplyTemplate = false" class="text-zinc-500 hover:text-zinc-200 text-xl">×</button>
+    </header>
+    <div class="p-6 space-y-3">
+      <p class="text-sm text-amber-400 bg-amber-900/20 border border-amber-700/30 rounded p-3">
+        ⚠️ This OVERWRITES IDENTITY/SOUL/STYLE/AGENTS/MEMORY.md. Save anything you want to keep first.
+      </p>
+      <template x-for="t in availableTemplates" :key="t.id">
+        <button @click="confirmApplyTemplate(t.id)"
+                class="w-full text-left border border-zinc-700 hover:bg-zinc-800 rounded-xl p-4 flex gap-3 items-start">
+          <div class="text-2xl shrink-0" x-text="t.icon"></div>
+          <div class="flex-1">
+            <div class="font-bold" x-text="t.label"></div>
+            <div class="text-xs text-zinc-400 mt-1" x-text="t.description"></div>
+          </div>
+        </button>
+      </template>
+    </div>
+  </div>
+</div>
+
 <!-- ─────── TOAST ─────── -->
 <div x-show="toast" x-transition.opacity
      class="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg shadow-lg"
@@ -514,15 +820,14 @@ claude --plugin-dir ~/Projects/cc-whatsapp/plugin --dangerously-skip-permissions
 
 <!-- ─────── CONFIRM SWITCH-AWAY ─────── -->
 <div x-show="confirmTab" x-transition.opacity
-     class="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" @click.self="confirmTab = null">
+     class="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" @click.self="confirmTab = false">
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6 max-w-md">
     <h3 class="text-lg font-bold mb-2">Unsaved changes</h3>
     <p class="text-sm text-zinc-400 mb-6">
-      You have unsaved changes on the <strong x-text="activeTab"></strong> tab.
-      What do you want to do?
+      You have unsaved changes on the <strong x-text="activeTab"></strong> tab. What do you want to do?
     </p>
     <div class="flex gap-2 justify-end">
-      <button @click="confirmTab = null" class="px-4 py-2 text-sm rounded border border-zinc-700 hover:bg-zinc-800">Stay</button>
+      <button @click="confirmTab = false" class="px-4 py-2 text-sm rounded border border-zinc-700 hover:bg-zinc-800">Stay</button>
       <button @click="discardAndSwitch()" class="px-4 py-2 text-sm rounded border border-zinc-700 hover:bg-zinc-800">Discard & switch</button>
       <button @click="saveAndSwitch()" class="px-4 py-2 text-sm rounded bg-emerald-600 hover:bg-emerald-500 text-white">Save & switch</button>
     </div>

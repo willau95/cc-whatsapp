@@ -1,4 +1,4 @@
-// cc-whatsapp dashboard frontend — beginner-friendly + edit/save/cancel pattern.
+// cc-whatsapp dashboard frontend.
 // Vanilla JS + Alpine.js. No build step.
 
 function app() {
@@ -9,18 +9,25 @@ function app() {
     selected: null,
 
     // ─── tabs ───
+    // dirty status looked up via isTabDirty(id) method — DON'T put closures
+    // here, `this` in arrow funcs captures lexical scope (NOT the Alpine
+    // component instance), so referencing this.personaDirty inside an arrow
+    // function defined here would throw at render time.
     tabs: [
-      { id: 'overview',   icon: '📊', label: 'Overview',   dirty: () => false },
-      { id: 'chats',      icon: '💬', label: 'Chats',      dirty: () => false },
-      { id: 'persona',    icon: '🎭', label: 'Persona',    dirty: () => Object.values(this.personaDirty).some(v => v) },
-      { id: 'tunables',   icon: '🎚',  label: 'Tunables',   dirty: () => this.tunablesIsDirty },
-      { id: 'production', icon: '🔬', label: 'Production', dirty: () => false },
-      { id: 'access',     icon: '🔐', label: 'Access',     dirty: () => this.accessIsDirty },
-      { id: 'settings',   icon: '⚙️',  label: 'Settings',   dirty: () => false },
+      { id: 'projects',   icon: '🏠', label: 'Projects',    needsProject: false },
+      { id: 'overview',   icon: '📊', label: 'Overview',    needsProject: true },
+      { id: 'chats',      icon: '💬', label: 'Chats',       needsProject: true },
+      { id: 'persona',    icon: '🎭', label: 'Persona',     needsProject: true },
+      { id: 'tunables',   icon: '🎚',  label: 'Tunables',    needsProject: true },
+      { id: 'production', icon: '🔬', label: 'Production',  needsProject: true },
+      { id: 'access',     icon: '🔐', label: 'Access',      needsProject: true },
+      { id: 'mcp-tools',  icon: '🔧', label: 'MCP & Tools', needsProject: true },
+      { id: 'settings',   icon: '⚙️',  label: 'Settings',    needsProject: true },
     ],
-    activeTab: 'overview',
+    activeTab: 'projects',
     pendingTab: null,
     confirmTab: false,
+    showApplyTemplate: false,
 
     // ─── overview ───
     liveState: {},
@@ -75,7 +82,7 @@ function app() {
       },
       inter_segment_min_ms: {
         label: 'Inter-segment delay (min)', type: 'number', unit: 'ms', step: 100, min: 0, max: 10_000, default: 800,
-        help: 'Min wait between chunks during a multi-message reply. Real humans take 1-5 seconds between sends — scale this up if it looks too quick.',
+        help: 'Min wait between chunks during a multi-message reply. Real humans take 1-5 seconds between sends.',
         feelLike: v => v < 500 ? 'instant' : v < 1500 ? 'snappy' : v < 4000 ? 'natural' : 'slow typist',
       },
       inter_segment_max_ms: {
@@ -84,33 +91,33 @@ function app() {
         feelLike: v => `up to ${(v/1000).toFixed(1)}s`,
       },
       length_factor_short: {
-        label: 'Length factor — short msgs (<20 chars)', type: 'number', unit: '×', step: 0.1, min: 0.1, max: 3, default: 0.5,
-        help: 'Multiplier for inter-segment delay on SHORT messages. <1 = faster than baseline. Short messages should be quick.',
-        feelLike: v => `${v}× the baseline`,
+        label: 'Length factor — short (<20 chars)', type: 'number', unit: '×', step: 0.1, min: 0.1, max: 3, default: 0.5,
+        help: 'Multiplier for inter-segment delay on SHORT messages. <1 = faster than baseline.',
+        feelLike: v => `${v}× baseline`,
       },
       length_factor_medium: {
-        label: 'Length factor — medium msgs (20–100 chars)', type: 'number', unit: '×', step: 0.1, min: 0.1, max: 5, default: 1.0,
-        help: '1.0 = use the configured baseline as-is.',
-        feelLike: v => `${v}× the baseline`,
+        label: 'Length factor — medium (20–100 chars)', type: 'number', unit: '×', step: 0.1, min: 0.1, max: 5, default: 1.0,
+        help: '1.0 = use baseline as-is.',
+        feelLike: v => `${v}× baseline`,
       },
       length_factor_long: {
-        label: 'Length factor — long msgs (>100 chars)', type: 'number', unit: '×', step: 0.1, min: 0.1, max: 5, default: 1.6,
+        label: 'Length factor — long (>100 chars)', type: 'number', unit: '×', step: 0.1, min: 0.1, max: 5, default: 1.6,
         help: '>1 = longer wait. Long messages should take more "typing time".',
-        feelLike: v => `${v}× the baseline`,
+        feelLike: v => `${v}× baseline`,
       },
       quote_reply_probability: {
         label: 'Quote-reply probability', type: 'number', unit: '0–1', step: 0.05, min: 0, max: 1, default: 0.4,
-        help: 'When batch ≥ 2 messages, chance that Claude quotes ONE specific message in the burst. 0 = never quote-reply, 1 = always (if batch ≥ 2).',
+        help: 'When batch ≥ 2 messages, chance Claude quotes ONE specific message in the burst.',
         feelLike: v => `~${Math.round(v*100)}% of multi-msg batches will use quote-reply`,
       },
       multi_msg_max_segments: {
         label: 'Max reply segments', type: 'number', unit: 'count', step: 1, min: 1, max: 8, default: 4,
-        help: 'Maximum reply chunks per turn. 1 = always single message. Higher = more natural multi-message responses (like a real person).',
+        help: 'Maximum reply chunks per turn. 1 = always single message. Higher = more natural multi-message responses.',
         feelLike: v => v === 1 ? 'always one block' : `up to ${v} natural messages`,
       },
       enable_typing_indicator: {
         label: 'Typing indicator', type: 'boolean', default: true,
-        help: 'Show "Eva is typing…" in WhatsApp while the bot is processing + replying. Off = invisible (more stealth, less human).',
+        help: 'Show "is typing…" in WhatsApp while the bot is processing + replying. Off = invisible (more stealth, less human).',
       },
       chat_model: {
         label: 'Chat model', type: 'text', default: 'claude-haiku-4-5-20251001',
@@ -118,7 +125,7 @@ function app() {
       },
       max_prompt_chars: {
         label: 'Max chars per inbound msg', type: 'number', unit: 'chars', step: 500, min: 500, max: 100_000, default: 8000,
-        help: 'Truncate a single inbound message at this length before feeding to Claude. Prevents the prompt from exploding if someone pastes a wall of text.',
+        help: 'Truncate a single inbound message at this length before feeding to Claude.',
         feelLike: v => v < 2000 ? 'tight' : v < 10_000 ? 'comfortable' : 'very long allowed',
       },
     },
@@ -127,7 +134,7 @@ function app() {
         values: { collect_window_ms: 60_000, pre_reply_min_ms: 30_000, pre_reply_max_ms: 60_000, multi_msg_max_segments: 4 } },
       { name: '⚡ Quick chat', desc: 'Faster — for active conversations where speed matters',
         values: { collect_window_ms: 15_000, pre_reply_min_ms: 3_000, pre_reply_max_ms: 10_000, multi_msg_max_segments: 3 } },
-      { name: '😴 Lazy bot', desc: 'Very humanlike — takes minutes to respond, like a busy person',
+      { name: '😴 Lazy bot', desc: 'Very humanlike — minutes to respond, like a busy person',
         values: { collect_window_ms: 90_000, pre_reply_min_ms: 60_000, pre_reply_max_ms: 300_000, multi_msg_max_segments: 4 } },
       { name: '🥷 Stealth', desc: 'Long delays + typing off — hardest to detect as AI',
         values: { collect_window_ms: 120_000, pre_reply_min_ms: 90_000, pre_reply_max_ms: 600_000, enable_typing_indicator: false } },
@@ -139,36 +146,78 @@ function app() {
     accessIsDirty: false,
     newJid: '',
 
+    // ─── mcp & tools ───
+    extraMcpsSaved: { mcpServers: {} },
+    extraMcpsDraft: { mcpServers: {} },
+    extraMcpsIsDirty: false,
+    newMcp: { name: '', command: '', args: '' },
+    availableTools: [
+      'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob',
+      'WebFetch', 'WebSearch', 'Task', 'TodoWrite', 'NotebookEdit',
+    ],
+
+    // ─── templates ───
+    availableTemplates: [],
+
     // ─── production / turns ───
     turns: [],
     turnDetail: null,
+
+    // ─── contact memory editor (drawer) ───
+    contactEditor: { open: false, jid: '', saved: '', draft: '' },
+
+    // ─── wizard ───
+    wizard: {
+      open: false, step: 1, busy: false, error: null,
+      name: '', parentDir: '', account: '', template: 'eva',
+      newProjectId: null,
+      pairStatus: 'idle',
+      pairError: '',
+      pairAlreadyDone: false,
+      eventSource: null,
+    },
+
+    // ─── pair modal (re-pair) ───
+    pairModal: { open: false, status: 'idle', error: '', eventSource: null },
 
     // ─── ui state ───
     toast: null,
 
     // ─── lifecycle ───
     async init() {
+      const [hostInfo, templates] = await Promise.all([
+        fetch('/api/host-info').then(r => r.json()).catch(() => ({})),
+        fetch('/api/templates').then(r => r.json()).catch(() => []),
+      ])
+      this.wizard.parentDir = hostInfo.defaultParent || ''
+      this.availableTemplates = templates
+
       await this.refresh()
-      if (this.projects.length && !this.selectedId) {
+      if (this.projects.length > 0) {
         await this.select(this.projects[0].id)
+        this.activeTab = 'overview'
+      } else {
+        this.activeTab = 'projects'
       }
-      // Poll for live state every 2s
       setInterval(() => { if (this.selectedId) this.pollLiveState() }, 2000)
     },
 
     async refresh() {
-      const r = await fetch('/api/projects')
-      this.projects = await r.json()
-      if (this.selectedId) {
-        const fresh = this.projects.find(p => p.id === this.selectedId)
-        if (fresh) this.selected = fresh
+      try {
+        const r = await fetch('/api/projects')
+        this.projects = await r.json()
+        if (this.selectedId) {
+          const fresh = this.projects.find(p => p.id === this.selectedId)
+          if (fresh) this.selected = fresh
+        }
+      } catch (err) {
+        this.flashToast('Failed to refresh: ' + err, 'error')
       }
     },
 
     async select(id) {
       if (this.isDirty()) {
-        // User has unsaved changes — confirm before switching project
-        if (!confirm('You have unsaved changes. Switch project anyway (changes will be lost)?')) {
+        if (!confirm('You have unsaved changes. Switch project anyway?')) {
           this.selectedId = this.selected?.id
           return
         }
@@ -180,37 +229,58 @@ function app() {
       this.activeChat = null
       this.chatMessages = []
       this.turnDetail = null
-      await Promise.all([this.loadPersona(), this.loadTunables(), this.loadAccess(), this.loadConversations(), this.loadTurns(), this.pollLiveState()])
+      await Promise.all([
+        this.loadPersona(),
+        this.loadTunables(),
+        this.loadAccess(),
+        this.loadConversations(),
+        this.loadTurns(),
+        this.loadExtraMcps(),
+        this.pollLiveState(),
+      ])
       this.connectTrace()
     },
 
-    // ─── tabs ───
+    // ─── isTabDirty (method form — avoids arrow-function-this bug) ───
+    isTabDirty(id) {
+      if (id === 'persona')  return Object.values(this.personaDirty || {}).some(v => v)
+      if (id === 'tunables') return this.tunablesIsDirty
+      if (id === 'access')   return this.accessIsDirty
+      if (id === 'mcp-tools')return this.extraMcpsIsDirty || this.tunablesIsDirty
+      return false
+    },
+
     switchTab(id) {
       if (id === this.activeTab) return
-      const dirty = this.tabs.find(t => t.id === this.activeTab)?.dirty.call(this)
-      if (dirty) {
+      const t = this.tabs.find(t => t.id === id)
+      if (t?.needsProject && !this.selected) {
+        this.flashToast('Pick a project first', 'error')
+        return
+      }
+      if (this.isTabDirty(this.activeTab)) {
         this.pendingTab = id
         this.confirmTab = true
         return
       }
       this.activeTab = id
-      if (id === 'turns' || id === 'production') this.loadTurns()
+      if (id === 'production') this.loadTurns()
     },
     async saveAndSwitch() {
       await this.saveAll()
-      this.activeTab = this.pendingTab
+      if (this.pendingTab) this.activeTab = this.pendingTab
       this.pendingTab = null
       this.confirmTab = false
     },
     discardAndSwitch() {
       this.discardAll()
-      this.activeTab = this.pendingTab
+      if (this.pendingTab) this.activeTab = this.pendingTab
       this.pendingTab = null
       this.confirmTab = false
     },
 
     // ─── persona ───
     async loadPersona() {
+      if (!this.selectedId) return
       const r = await fetch(`/api/projects/${this.selectedId}/persona`)
       this.personaSaved = await r.json()
       this.personaDraft = { ...this.personaSaved }
@@ -220,7 +290,9 @@ function app() {
       this.activePersonaFile = name
     },
     markPersonaDirty() {
-      this.personaDirty[this.activePersonaFile] = this.personaDraft[this.activePersonaFile] !== this.personaSaved[this.activePersonaFile]
+      const cur = this.personaDraft[this.activePersonaFile] ?? ''
+      const saved = this.personaSaved[this.activePersonaFile] ?? ''
+      this.personaDirty[this.activePersonaFile] = cur !== saved
     },
     async savePersona() {
       const dirtyFiles = Object.keys(this.personaDirty).filter(k => this.personaDirty[k])
@@ -235,9 +307,22 @@ function app() {
       this.personaDirty = {}
       this.flashToast(`Saved ${dirtyFiles.length} persona file(s)`)
     },
+    async confirmApplyTemplate(templateId) {
+      if (!confirm('This overwrites all 5 persona files. Continue?')) return
+      const r = await fetch(`/api/projects/${this.selectedId}/persona/apply-template`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template: templateId }),
+      })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Apply failed: ' + (d.err ?? 'unknown'), 'error'); return }
+      this.showApplyTemplate = false
+      await this.loadPersona()
+      this.flashToast('Persona template applied')
+    },
 
     // ─── tunables ───
     async loadTunables() {
+      if (!this.selectedId) return
       const r = await fetch(`/api/projects/${this.selectedId}/tunables`)
       this.tunablesSaved = await r.json()
       this.tunablesDraft = { ...this.tunablesSaved }
@@ -257,14 +342,24 @@ function app() {
         body: JSON.stringify(this.tunablesDraft),
       })
       if (!r.ok) { this.flashToast('Tunables save failed', 'error'); return }
-      const data = await r.json()
       this.tunablesSaved = { ...this.tunablesDraft }
       this.tunablesIsDirty = false
-      this.flashToast('Tunables saved — applies live on next message')
+      this.flashToast('Tunables saved — applies on next message')
+    },
+
+    toggleAllowedTool(tool) {
+      const arr = this.tunablesDraft.allowed_tools || []
+      if (arr.includes(tool)) {
+        this.tunablesDraft.allowed_tools = arr.filter(t => t !== tool)
+      } else {
+        this.tunablesDraft.allowed_tools = [...arr, tool]
+      }
+      this.markTunablesDirty()
     },
 
     // ─── access ───
     async loadAccess() {
+      if (!this.selectedId) return
       const r = await fetch(`/api/projects/${this.selectedId}/access`)
       const data = await r.json()
       this.accessSaved = { allowFrom: data.allowFrom ?? [], disabled: !!data.disabled }
@@ -301,8 +396,11 @@ function app() {
 
     // ─── conversations ───
     async loadConversations() {
-      const r = await fetch(`/api/projects/${this.selectedId}/conversations`)
-      this.conversations = await r.json()
+      if (!this.selectedId) return
+      try {
+        const r = await fetch(`/api/projects/${this.selectedId}/conversations`)
+        this.conversations = await r.json()
+      } catch {}
     },
     async openChat(jid) {
       this.activeChat = jid
@@ -313,13 +411,36 @@ function app() {
         if (this.$refs.chatMessages) this.$refs.chatMessages.scrollTop = this.$refs.chatMessages.scrollHeight
       })
     },
+
+    // ─── contact memory editor ───
     async openContactFile(jid) {
-      // For now: jump to overview / future: open contact memory drawer
-      this.flashToast('Contact memory file editing coming in next iteration')
+      const r = await fetch(`/api/projects/${this.selectedId}/contacts/${encodeURIComponent(jid)}`)
+      const data = await r.json()
+      this.contactEditor = {
+        open: true, jid,
+        saved: data.content ?? '',
+        draft: data.content ?? '',
+      }
+    },
+    closeContactEditor() {
+      if (this.contactEditor.draft !== this.contactEditor.saved) {
+        if (!confirm('Unsaved changes will be lost. Close anyway?')) return
+      }
+      this.contactEditor = { open: false, jid: '', saved: '', draft: '' }
+    },
+    async saveContactEditor() {
+      const r = await fetch(`/api/projects/${this.selectedId}/contacts/${encodeURIComponent(this.contactEditor.jid)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'text/plain' },
+        body: this.contactEditor.draft,
+      })
+      if (!r.ok) { this.flashToast('Save failed', 'error'); return }
+      this.contactEditor.saved = this.contactEditor.draft
+      this.flashToast('Contact memory saved')
     },
 
     // ─── turns ───
     async loadTurns() {
+      if (!this.selectedId) return
       const r = await fetch(`/api/projects/${this.selectedId}/turns?limit=30`)
       this.turns = await r.json()
     },
@@ -334,8 +455,57 @@ function app() {
       return (avg / 1000).toFixed(1) + 's'
     },
 
-    // ─── trace WebSocket ───
+    // ─── extra MCPs ───
+    async loadExtraMcps() {
+      if (!this.selectedId) return
+      try {
+        const r = await fetch(`/api/projects/${this.selectedId}/mcps`)
+        this.extraMcpsSaved = await r.json()
+        this.extraMcpsDraft = JSON.parse(JSON.stringify(this.extraMcpsSaved))
+        this.extraMcpsIsDirty = false
+      } catch {
+        this.extraMcpsSaved = { mcpServers: {} }
+        this.extraMcpsDraft = { mcpServers: {} }
+        this.extraMcpsIsDirty = false
+      }
+    },
+    addMcpServer() {
+      const { name, command, args } = this.newMcp
+      if (!name || !command) {
+        this.flashToast('Need at least name + command', 'error')
+        return
+      }
+      if (name === 'whatsapp') {
+        this.flashToast('Cannot override built-in "whatsapp" server', 'error')
+        return
+      }
+      this.extraMcpsDraft.mcpServers = {
+        ...(this.extraMcpsDraft.mcpServers || {}),
+        [name]: { command, args: (args || '').split(' ').filter(Boolean) },
+      }
+      this.extraMcpsIsDirty = JSON.stringify(this.extraMcpsDraft) !== JSON.stringify(this.extraMcpsSaved)
+      this.newMcp = { name: '', command: '', args: '' }
+    },
+    removeMcpServer(name) {
+      const next = { ...(this.extraMcpsDraft.mcpServers || {}) }
+      delete next[name]
+      this.extraMcpsDraft = { mcpServers: next }
+      this.extraMcpsIsDirty = JSON.stringify(this.extraMcpsDraft) !== JSON.stringify(this.extraMcpsSaved)
+    },
+    async saveExtraMcps() {
+      const r = await fetch(`/api/projects/${this.selectedId}/mcps`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this.extraMcpsDraft),
+      })
+      if (!r.ok) { this.flashToast('MCP save failed', 'error'); return }
+      this.extraMcpsSaved = JSON.parse(JSON.stringify(this.extraMcpsDraft))
+      this.extraMcpsIsDirty = false
+      this.flashToast('Extra MCPs saved — applies on next turn')
+    },
+
+    // ─── trace WS ───
     connectTrace() {
+      if (!this.selectedId) return
       const url = `ws://${location.host}/ws/projects/${this.selectedId}/trace`
       try { this.ws = new WebSocket(url) } catch { return }
       this.ws.onmessage = (e) => {
@@ -348,7 +518,6 @@ function app() {
       this.ws.onclose = () => setTimeout(() => { if (this.selectedId) this.connectTrace() }, 2000)
     },
 
-    // ─── live state polling ───
     async pollLiveState() {
       if (!this.selectedId) return
       try {
@@ -363,7 +532,7 @@ function app() {
       const d = await r.json()
       if (!d.ok) { this.flashToast('Start failed: ' + (d.err ?? 'unknown'), 'error'); return }
       this.flashToast('Router started')
-      setTimeout(() => this.refresh().then(() => this.refresh()), 2000)
+      setTimeout(() => this.refresh(), 2000)
     },
     async stopRouter() {
       if (!confirm('Stop the router? The bot will go offline immediately.')) return
@@ -374,23 +543,26 @@ function app() {
       setTimeout(() => this.refresh(), 1500)
     },
 
-    // ─── save/discard all (sticky bar) ───
+    // ─── save/discard all ───
     isDirty() {
-      return Object.values(this.personaDirty).some(v => v) || this.tunablesIsDirty || this.accessIsDirty
+      return Object.values(this.personaDirty || {}).some(v => v)
+        || this.tunablesIsDirty || this.accessIsDirty || this.extraMcpsIsDirty
     },
     dirtySummary() {
       const parts = []
-      const p = Object.keys(this.personaDirty).filter(k => this.personaDirty[k]).length
+      const p = Object.keys(this.personaDirty || {}).filter(k => this.personaDirty[k]).length
       if (p) parts.push(`${p} persona file${p > 1 ? 's' : ''}`)
       if (this.tunablesIsDirty) parts.push('tunables')
       if (this.accessIsDirty) parts.push('allowlist')
+      if (this.extraMcpsIsDirty) parts.push('MCP servers')
       return parts.length ? `Unsaved changes: ${parts.join(', ')}` : ''
     },
     async saveAll() {
       const promises = []
-      if (Object.values(this.personaDirty).some(v => v)) promises.push(this.savePersona())
+      if (Object.values(this.personaDirty || {}).some(v => v)) promises.push(this.savePersona())
       if (this.tunablesIsDirty) promises.push(this.saveTunables())
       if (this.accessIsDirty) promises.push(this.saveAccess())
+      if (this.extraMcpsIsDirty) promises.push(this.saveExtraMcps())
       await Promise.all(promises)
     },
     discardAll() {
@@ -400,7 +572,175 @@ function app() {
       this.tunablesIsDirty = false
       this.accessDraft = JSON.parse(JSON.stringify(this.accessSaved))
       this.accessIsDirty = false
+      this.extraMcpsDraft = JSON.parse(JSON.stringify(this.extraMcpsSaved))
+      this.extraMcpsIsDirty = false
       this.flashToast('Discarded all changes')
+    },
+
+    // ─── wizard ───
+    openWizard() {
+      this.wizard = {
+        ...this.wizard,
+        open: true, step: 1, busy: false, error: null,
+        name: '', account: '', template: 'eva',
+        newProjectId: null,
+        pairStatus: 'idle', pairError: '', pairAlreadyDone: false,
+        eventSource: null,
+      }
+    },
+    closeWizard() {
+      if (this.wizard.eventSource) { try { this.wizard.eventSource.close() } catch {} }
+      if (this.wizard.newProjectId && (this.wizard.step === 4 || this.wizard.pairStatus === 'paired')) {
+        this.refresh().then(() => {
+          this.select(this.wizard.newProjectId)
+          this.activeTab = 'overview'
+          this.wizard.open = false
+        })
+      } else {
+        this.wizard.open = false
+      }
+    },
+    async wizardStep1Next() {
+      this.wizard.error = null
+      this.wizard.busy = true
+      try {
+        const r = await fetch('/api/projects', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            parentDir: this.wizard.parentDir,
+            name: this.wizard.name,
+            account: this.wizard.account || this.wizard.name,
+            template: this.wizard.template,
+          }),
+        })
+        const data = await r.json()
+        if (!data.ok) {
+          this.wizard.error = data.err ?? 'create failed'
+          return
+        }
+        this.wizard.newProjectId = data.id
+        await this.refresh()
+        this.wizard.step = 2
+      } finally {
+        this.wizard.busy = false
+      }
+    },
+    async wizardStep2Next() {
+      this.wizard.busy = true
+      try {
+        if (this.wizard.template) {
+          await fetch(`/api/projects/${this.wizard.newProjectId}/persona/apply-template`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ template: this.wizard.template }),
+          })
+        }
+        await this.refresh()
+        const proj = this.projects.find(p => p.id === this.wizard.newProjectId)
+        if (proj?.paired) {
+          this.wizard.pairAlreadyDone = true
+          this.wizard.step = 4
+          return
+        }
+        await this.wizardStartPair()
+        this.wizard.step = 3
+      } finally {
+        this.wizard.busy = false
+      }
+    },
+    async wizardStartPair() {
+      this.wizard.pairStatus = 'starting'
+      this.wizard.pairError = ''
+      const startRes = await fetch(`/api/projects/${this.wizard.newProjectId}/pair/start`, { method: 'POST' })
+      const startData = await startRes.json()
+      if (!startData.ok) {
+        this.wizard.pairStatus = 'error'
+        this.wizard.pairError = startData.err ?? 'unknown'
+        return
+      }
+      const es = new EventSource(`/api/projects/${this.wizard.newProjectId}/pair/stream`)
+      this.wizard.eventSource = es
+      es.addEventListener('qr', (e) => {
+        this.wizard.pairStatus = 'qr'
+        this.$nextTick(() => this.renderQr(this.$refs.wizardQrCanvas, e.data))
+      })
+      es.addEventListener('status', (e) => {
+        const d = e.data
+        if (d === 'paired') {
+          this.wizard.pairStatus = 'paired'
+          this.refresh()
+        } else if (d.startsWith('error:')) {
+          this.wizard.pairStatus = 'error'
+          this.wizard.pairError = d.slice(6)
+        } else if (d === 'timeout') {
+          this.wizard.pairStatus = 'timeout'
+        }
+      })
+      es.onerror = () => {}
+    },
+    async wizardRetryPair() {
+      if (this.wizard.eventSource) { try { this.wizard.eventSource.close() } catch {} }
+      await fetch(`/api/projects/${this.wizard.newProjectId}/pair/stop`, { method: 'POST' }).catch(() => {})
+      await this.wizardStartPair()
+    },
+
+    // ─── re-pair modal ───
+    async openPair() {
+      this.pairModal = { open: true, status: 'starting', error: '', eventSource: null }
+      const startRes = await fetch(`/api/projects/${this.selectedId}/pair/start`, { method: 'POST' })
+      const startData = await startRes.json()
+      if (!startData.ok) {
+        this.pairModal.status = 'error'
+        this.pairModal.error = startData.err ?? 'unknown'
+        return
+      }
+      const es = new EventSource(`/api/projects/${this.selectedId}/pair/stream`)
+      this.pairModal.eventSource = es
+      es.addEventListener('qr', (e) => {
+        this.pairModal.status = 'qr'
+        this.$nextTick(() => this.renderQr(this.$refs.pairQrCanvas, e.data))
+      })
+      es.addEventListener('status', (e) => {
+        const d = e.data
+        if (d === 'paired') {
+          this.pairModal.status = 'paired'
+          this.refresh()
+        } else if (d.startsWith('error:')) {
+          this.pairModal.status = 'error'
+          this.pairModal.error = d.slice(6)
+        }
+      })
+    },
+    closePair() {
+      if (this.pairModal.eventSource) { try { this.pairModal.eventSource.close() } catch {} }
+      if (this.pairModal.status !== 'paired') {
+        fetch(`/api/projects/${this.selectedId}/pair/stop`, { method: 'POST' }).catch(() => {})
+      }
+      this.pairModal = { open: false, status: 'idle', error: '', eventSource: null }
+    },
+
+    renderQr(canvas, text) {
+      if (!canvas || !text) return
+      try {
+        window.QRCode.toCanvas(canvas, text, { width: 280, margin: 2, errorCorrectionLevel: 'M' }, (err) => {
+          if (err) console.error('QR render failed', err)
+        })
+      } catch (err) {
+        console.error('QRCode lib not loaded', err)
+      }
+    },
+
+    // ─── project delete ───
+    async deleteProject() {
+      if (!confirm(`Delete config for "${this.selected.name}"? Wipes .claude/cc-whatsapp/. The project folder itself stays.`)) return
+      if (!confirm('Really? This cannot be undone.')) return
+      const r = await fetch(`/api/projects/${this.selectedId}`, { method: 'DELETE' })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Delete failed: ' + (d.err ?? 'unknown'), 'error'); return }
+      this.flashToast('Project config deleted')
+      this.selectedId = null
+      this.selected = null
+      this.activeTab = 'projects'
+      await this.refresh()
     },
 
     // ─── helpers ───
@@ -441,6 +781,7 @@ function app() {
       return [
         { label: 'Project path', value: this.selected.path },
         { label: 'wacli account', value: this.selected.account },
+        { label: 'Paired', value: this.selected.paired ? 'YES' : 'no' },
         { label: 'Router PID', value: this.selected.routerPid ? `${this.selected.routerPid} (alive: ${this.selected.routerAlive})` : 'not running' },
         { label: 'Sync PID', value: this.selected.syncPid ? `${this.selected.syncPid} (alive: ${this.selected.syncAlive})` : 'not running' },
         { label: 'Allowlist count', value: this.selected.allowFrom.length },
@@ -450,7 +791,7 @@ function app() {
     },
     flashToast(msg, kind = 'ok') {
       this.toast = { msg, kind }
-      setTimeout(() => { this.toast = null }, 2500)
+      setTimeout(() => { this.toast = null }, 2800)
     },
   }
 }

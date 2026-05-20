@@ -3,7 +3,8 @@
  * cc-whatsapp dashboard — local web UI for managing all bots on this machine.
  *
  * Standalone Bun server. Discovers cc-whatsapp projects on disk, lets you
- * read/edit/control them via browser. No SaaS, no auth — strictly localhost.
+ * create / pair / read / edit / control them via browser. No SaaS, no auth —
+ * strictly localhost.
  *
  * Run:   bun dashboard.ts
  * Open:  http://localhost:38500/
@@ -15,23 +16,26 @@ import {
   readFileSync,
   readdirSync,
   statSync,
-  watchFile,
   writeFileSync,
   renameSync,
+  copyFileSync,
+  rmSync,
 } from 'fs'
 import { homedir } from 'os'
-import { dirname, join, resolve } from 'path'
+import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
+import { spawn, type ChildProcess } from 'child_process'
 
 const PLUGIN_ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = dirname(PLUGIN_ROOT)
 const WEB_ROOT = join(PLUGIN_ROOT, 'web')
+const TEMPLATES_PERSONAS = join(PLUGIN_ROOT, 'templates', 'personas')
+const TEMPLATES_AGENT = join(PLUGIN_ROOT, 'templates', 'agent')   // legacy default
 const PORT = Number(process.env.CC_WHATSAPP_DASHBOARD_PORT ?? 38500)
+const CC_WHATSAPP_BIN = join(REPO_ROOT, 'bin', 'cc-whatsapp')
 
 // ─── Project discovery ─────────────────────────────────────────────────────
 
-// A cc-whatsapp project is any dir containing .claude/cc-whatsapp/config.json.
-// Discovery locations (deduped): ~/Projects/*, $HOME (top-level cc-whatsapp dirs).
 function discoverProjects(): Project[] {
   const found = new Map<string, Project>()
   const roots = [
@@ -54,9 +58,9 @@ function discoverProjects(): Project[] {
 }
 
 type Project = {
-  id: string          // base64url of abs path
-  path: string        // abs path to project root
-  name: string        // basename
+  id: string
+  path: string
+  name: string
   account: string
   routerAlive: boolean
   routerPid?: number
@@ -65,6 +69,7 @@ type Project = {
   allowFrom: string[]
   disabled: boolean
   contactCount: number
+  paired: boolean
 }
 
 function pathToId(absPath: string): string {
@@ -85,11 +90,12 @@ function projectInfo(absPath: string): Project {
     const cdir = join(stateDir, 'agent', 'contacts')
     contactCount = readdirSync(cdir).filter(f => f.endsWith('.md') && f !== 'TEMPLATE.md').length
   } catch {}
+  const account = cfg.account ?? 'main'
   return {
     id: pathToId(absPath),
     path: absPath,
     name: absPath.split('/').filter(Boolean).pop() ?? absPath,
-    account: cfg.account ?? 'main',
+    account,
     routerAlive: isPidAlive(routerPid),
     routerPid,
     syncAlive: isPidAlive(syncPid),
@@ -97,7 +103,29 @@ function projectInfo(absPath: string): Project {
     allowFrom: access.allowFrom ?? [],
     disabled: !!access.disabled,
     contactCount,
+    paired: isAccountPaired(account),
   }
+}
+
+// An account is "paired" if cc-whatsapp lists it AND its store .db is sizable.
+// The default 'main' account stores at ~/.wacli/wacli.db; named accounts at
+// ~/.wacli/accounts/<name>/wacli.db. We get the canonical store_dir from
+// `cc-whatsapp accounts list --json`.
+function isAccountPaired(account: string): boolean {
+  try {
+    const r = Bun.spawnSync({
+      cmd: [CC_WHATSAPP_BIN, 'accounts', 'list', '--json'],
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    const parsed = JSON.parse(new TextDecoder().decode(r.stdout))
+    const accounts: any[] = parsed?.data?.accounts ?? []
+    const match = accounts.find(a => a.name === account)
+    if (!match) return false
+    const storeDir = match.store_dir
+    if (!storeDir) return false
+    const dbPath = join(storeDir, 'wacli.db')
+    return statSync(dbPath).size > 8000
+  } catch { return false }
 }
 
 function readJsonSafe(path: string): any {
@@ -117,7 +145,6 @@ function getStateDir(id: string): string {
   return join(idToPath(id), '.claude', 'cc-whatsapp')
 }
 
-// Atomic JSON write (tmp + rename).
 function writeJsonAtomic(path: string, data: any): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   const tmp = path + '.tmp'
@@ -133,29 +160,24 @@ function writeFileAtomic(path: string, data: string): void {
 }
 
 // ─── Tunables ──────────────────────────────────────────────────────────────
-// Per-project tunables.json — overrides default env-var-driven settings.
-// Router reads on every turn (fresh per webhook), so changes apply live.
 
 type Tunables = {
-  // ─ Basics: timing of replies (the most-visible humanlike feel) ─
   collect_window_ms?: number
   pre_reply_min_ms?: number
   pre_reply_max_ms?: number
   inter_segment_min_ms?: number
   inter_segment_max_ms?: number
-  // ─ Reply behaviour ─
-  quote_reply_probability?: number    // 0–1
-  multi_msg_max_segments?: number     // 1–8
-  enable_typing_indicator?: boolean   // shows "typing…" in WhatsApp
-  // ─ Brain ─
-  chat_model?: string                 // anthropic model id
-  max_prompt_chars?: number           // truncate single inbound msg at this length
-  // ─ Length-scaling factors for inter-segment delay (multiplied with min/max) ─
-  length_factor_short?: number        // text < 20 chars (default 0.5)
-  length_factor_medium?: number       // text 20–100 chars (default 1.0)
-  length_factor_long?: number         // text > 100 chars (default 1.6)
-  // ─ Experimental — future-flagged ─
-  quiet_hours_start?: number          // 0–23, empty = disabled (not yet wired)
+  quote_reply_probability?: number
+  multi_msg_max_segments?: number
+  enable_typing_indicator?: boolean
+  chat_model?: string
+  max_prompt_chars?: number
+  length_factor_short?: number
+  length_factor_medium?: number
+  length_factor_long?: number
+  allowed_tools?: string[]
+  disallowed_tools?: string[]
+  quiet_hours_start?: number
   quiet_hours_end?: number
 }
 
@@ -173,6 +195,8 @@ const TUNABLES_DEFAULTS: Tunables = {
   length_factor_short: 0.5,
   length_factor_medium: 1.0,
   length_factor_long: 1.6,
+  allowed_tools: [],
+  disallowed_tools: [],
 }
 
 function loadTunables(id: string): Tunables {
@@ -181,7 +205,7 @@ function loadTunables(id: string): Tunables {
   return { ...TUNABLES_DEFAULTS, ...stored }
 }
 
-// ─── HTTP API ───────────────────────────────────────────────────────────────
+// ─── HTTP helpers ──────────────────────────────────────────────────────────
 
 function json(data: any, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } })
@@ -211,8 +235,6 @@ function listContacts(id: string): { jid: string; size: number; mtime: string }[
   return out.sort((a, b) => b.mtime.localeCompare(a.mtime))
 }
 
-// Conversation list: WhatsApp-native (display name, last msg, count).
-// Combines: allowlist JIDs ∪ contact files ∪ recent webhook traces.
 function listConversations(id: string): Array<{
   jid: string
   displayName: string
@@ -227,7 +249,6 @@ function listConversations(id: string): Array<{
   const account = readJsonSafe(join(stateDir, 'config.json'))?.account ?? 'main'
   const seen = new Set<string>(access.allowFrom ?? [])
 
-  // Also include JIDs that have a contact file
   try {
     for (const f of readdirSync(join(stateDir, 'agent', 'contacts'))) {
       if (f.endsWith('.md') && f !== 'TEMPLATE.md') seen.add(f.replace(/\.md$/, ''))
@@ -236,14 +257,13 @@ function listConversations(id: string): Array<{
 
   const conversations: any[] = []
   for (const jid of seen) {
-    // Pull display name + last msg via wacli messages list
     let displayName = jid
     let lastText = ''
     let lastTimestamp = ''
     let lastFromMe = false
     try {
       const r = Bun.spawnSync({
-        cmd: [join(REPO_ROOT, 'bin', 'cc-whatsapp'), '--account', account, 'messages', 'list', '--chat', jid, '--limit', '1', '--json'],
+        cmd: [CC_WHATSAPP_BIN, '--account', account, 'messages', 'list', '--chat', jid, '--limit', '1', '--json'],
         stdout: 'pipe', stderr: 'pipe',
       })
       const out = new TextDecoder().decode(r.stdout)
@@ -257,7 +277,6 @@ function listConversations(id: string): Array<{
       }
     } catch {}
 
-    // Fallback display name from contact file's "PushName:" field
     if (displayName === jid) {
       try {
         const md = readFileSync(join(stateDir, 'agent', 'contacts', `${jid}.md`), 'utf8')
@@ -285,14 +304,14 @@ function fetchConversationMessages(id: string, jid: string, limit: number): {
   const account = readJsonSafe(join(getStateDir(id), 'config.json'))?.account ?? 'main'
   try {
     const r = Bun.spawnSync({
-      cmd: [join(REPO_ROOT, 'bin', 'cc-whatsapp'), '--account', account, 'messages', 'list', '--chat', jid, '--limit', String(limit), '--json', '--full'],
+      cmd: [CC_WHATSAPP_BIN, '--account', account, 'messages', 'list', '--chat', jid, '--limit', String(limit), '--json', '--full'],
       stdout: 'pipe', stderr: 'pipe',
     })
     const parsed = JSON.parse(new TextDecoder().decode(r.stdout))
     const msgs = (parsed?.data?.messages ?? []).map((m: any) => ({
       id: m.MsgID, text: m.Text || '', mediaType: m.MediaType || '',
       ts: m.Timestamp, fromMe: !!m.FromMe, sender: m.SenderName || '',
-    })).reverse()  // oldest first for chat display
+    })).reverse()
     return { jid, messages: msgs }
   } catch {
     return { jid, messages: [] }
@@ -346,7 +365,6 @@ function loadTurn(id: string, turnId: string): any {
   }
 }
 
-// Tail last N lines of trace.log (cheap; trace.log is small).
 function tailTrace(id: string, lines = 100): string[] {
   const path = join(getStateDir(id), 'trace.log')
   try {
@@ -354,6 +372,102 @@ function tailTrace(id: string, lines = 100): string[] {
     const all = text.trimEnd().split('\n')
     return all.slice(-lines)
   } catch { return [] }
+}
+
+// ─── Persona templates ─────────────────────────────────────────────────────
+
+const TEMPLATE_METADATA: Record<string, { label: string; description: string; icon: string }> = {
+  eva:                { label: 'Eva (friendly assistant)',   icon: '🌸', description: 'Cute, casual AI friend — the original default. Good for personal projects.' },
+  'customer-support': { label: 'Customer support agent',     icon: '🎧', description: 'Professional, calm, escalates billing/legal. End-of-turn [ESCALATE:] marker.' },
+  'sales-lead':       { label: 'Sales lead qualifier',        icon: '🎯', description: 'Friendly SDR. Asks BANT naturally. Hands off to humans with [HANDOFF:] marker.' },
+  companion:          { label: 'Personal companion',           icon: '💛', description: 'Warm, listens first, no life-coaching. Crisis [ALERT:] marker for serious flags.' },
+}
+
+function listTemplates(): Array<{ id: string; label: string; description: string; icon: string }> {
+  try {
+    const dirs = readdirSync(TEMPLATES_PERSONAS)
+    return dirs.filter(d => statSync(join(TEMPLATES_PERSONAS, d)).isDirectory())
+      .map(d => ({
+        id: d,
+        label: TEMPLATE_METADATA[d]?.label ?? d,
+        description: TEMPLATE_METADATA[d]?.description ?? '',
+        icon: TEMPLATE_METADATA[d]?.icon ?? '📄',
+      }))
+  } catch { return [] }
+}
+
+function readTemplateFiles(templateId: string): Record<string, string> | null {
+  const dir = join(TEMPLATES_PERSONAS, templateId)
+  if (!existsSync(dir)) return null
+  const out: Record<string, string> = {}
+  for (const name of ['IDENTITY.md', 'SOUL.md', 'STYLE.md', 'AGENTS.md', 'MEMORY.md']) {
+    try { out[name] = readFileSync(join(dir, name), 'utf8') } catch { out[name] = '' }
+  }
+  return out
+}
+
+function applyPersonaTemplate(projectId: string, templateId: string): { ok: boolean; err?: string } {
+  const tpl = readTemplateFiles(templateId)
+  if (!tpl) return { ok: false, err: `unknown template "${templateId}"` }
+  const agentDir = join(getStateDir(projectId), 'agent')
+  mkdirSync(agentDir, { recursive: true, mode: 0o700 })
+  for (const [name, content] of Object.entries(tpl)) {
+    writeFileAtomic(join(agentDir, name), content)
+  }
+  return { ok: true }
+}
+
+// ─── New project creation ──────────────────────────────────────────────────
+
+const SAFE_NAME = /^[a-z0-9_-]{1,40}$/i
+
+function createProject(opts: { parentDir: string; name: string; account: string; template?: string }): { ok: boolean; id?: string; err?: string } {
+  const { parentDir, name, account } = opts
+  if (!SAFE_NAME.test(name)) return { ok: false, err: 'project name must be a-z 0-9 _ - (max 40 chars)' }
+  if (!SAFE_NAME.test(account)) return { ok: false, err: 'account name must be a-z 0-9 _ - (max 40 chars)' }
+  let parent: string
+  try {
+    parent = parentDir.startsWith('~') ? join(homedir(), parentDir.slice(1).replace(/^\//, '')) : parentDir
+    if (!existsSync(parent)) mkdirSync(parent, { recursive: true })
+  } catch (err) {
+    return { ok: false, err: `cannot create parent dir: ${err}` }
+  }
+  const projectPath = join(parent, name)
+  if (existsSync(projectPath)) {
+    const cfgPath = join(projectPath, '.claude', 'cc-whatsapp', 'config.json')
+    if (existsSync(cfgPath)) return { ok: false, err: `${projectPath} already exists as a cc-whatsapp project` }
+  }
+  mkdirSync(projectPath, { recursive: true })
+  const stateDir = join(projectPath, '.claude', 'cc-whatsapp')
+  const agentDir = join(stateDir, 'agent')
+  const contactsDir = join(agentDir, 'contacts')
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 })
+  mkdirSync(agentDir, { recursive: true, mode: 0o700 })
+  mkdirSync(contactsDir, { recursive: true, mode: 0o700 })
+
+  writeJsonAtomic(join(stateDir, 'config.json'), { account })
+  writeJsonAtomic(join(stateDir, 'access.json'), { allowFrom: [] })
+  writeJsonAtomic(join(stateDir, 'sessions.json'), {})
+  writeJsonAtomic(join(stateDir, 'tunables.json'), {})
+
+  const tplId = opts.template || 'eva'
+  const tpl = readTemplateFiles(tplId) ?? readTemplateFiles('eva')
+  if (tpl) {
+    for (const [name, content] of Object.entries(tpl)) {
+      writeFileAtomic(join(agentDir, name), content)
+    }
+  }
+
+  // Copy contact TEMPLATE.md
+  try {
+    const src = join(TEMPLATES_AGENT, 'contacts', 'TEMPLATE.md')
+    if (existsSync(src)) copyFileSync(src, join(contactsDir, 'TEMPLATE.md'))
+  } catch {}
+
+  const id = pathToId(projectPath)
+  // Generate run.command for one-click router start
+  generateRunCommand(id)
+  return { ok: true, id }
 }
 
 // ─── Router control ────────────────────────────────────────────────────────
@@ -366,19 +480,17 @@ function startRouter(id: string): { ok: boolean; pid?: number; err?: string } {
   const path = idToPath(id)
   const stateDir = getStateDir(id)
   const cfg = readJsonSafe(join(stateDir, 'config.json'))
-  if (!cfg?.account) return { ok: false, err: 'no config.account — run /cc-whatsapp:init' }
-  // Ensure run.command exists (generate if missing).
+  if (!cfg?.account) return { ok: false, err: 'no config.account — initialize first' }
+  if (!isAccountPaired(cfg.account)) return { ok: false, err: `account "${cfg.account}" not paired yet — run pair first` }
   const runCmd = routerLaunchScript(id)
   if (!existsSync(runCmd)) generateRunCommand(id)
-  // Just spawn it directly (no Terminal); dashboard provides UI for trace.
-  // Spawn with detached + setsid so it survives dashboard restart.
-  const child = Bun.spawn(['bash', runCmd], {
+  const child = spawn('bash', [runCmd], {
     cwd: path,
     stdio: ['ignore', 'ignore', 'ignore'],
     env: { ...process.env },
+    detached: true,
   })
-  // Detach
-  ;(child as any).unref?.()
+  child.unref()
   return { ok: true, pid: child.pid }
 }
 
@@ -416,9 +528,161 @@ function stopRouter(id: string): { ok: boolean; err?: string } {
   return { ok: true }
 }
 
-// ─── Bun.serve dispatcher ──────────────────────────────────────────────────
+// ─── Pairing flow (cc-whatsapp accounts add + SSE stream) ──────────────────
+// We spawn the pair process per-account. Its stdout has the QR string;
+// stderr has progress events when --events is set. We broadcast both as SSE.
 
-const wsClients = new Map<string, Set<any>>()  // projectId → Set<WebSocket>
+type PairSession = {
+  child: ChildProcess
+  account: string
+  projectId: string
+  qrText: string                       // latest QR string (text format)
+  status: 'qr' | 'paired' | 'error' | 'timeout' | 'starting'
+  errorMsg?: string
+  subscribers: Set<(evt: string) => void>
+}
+const pairSessions = new Map<string, PairSession>()   // key = projectId
+
+function startPair(projectId: string): { ok: boolean; err?: string } {
+  if (pairSessions.has(projectId)) {
+    return { ok: false, err: 'pair already running for this project (stop it first)' }
+  }
+  const stateDir = getStateDir(projectId)
+  const account = readJsonSafe(join(stateDir, 'config.json'))?.account
+  if (!account) return { ok: false, err: 'no config.account' }
+
+  const args = ['--account', account, 'accounts', 'add', account, '--qr-format', 'text', '--events']
+  process.stderr.write(`[dashboard] spawning pair: ${CC_WHATSAPP_BIN} ${args.join(' ')}\n`)
+
+  let child: ChildProcess
+  try {
+    child = spawn(CC_WHATSAPP_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+  } catch (err) {
+    return { ok: false, err: `spawn failed: ${err}` }
+  }
+
+  const sess: PairSession = {
+    child, account, projectId,
+    qrText: '',
+    status: 'starting',
+    subscribers: new Set(),
+  }
+  pairSessions.set(projectId, sess)
+
+  const broadcast = (evt: string, data: string): void => {
+    const msg = `event: ${evt}\ndata: ${data}\n\n`
+    for (const sub of sess.subscribers) {
+      try { sub(msg) } catch {}
+    }
+  }
+
+  let stdoutBuf = ''
+  let stderrBuf = ''
+
+  child.stdout?.on('data', d => {
+    const text = d.toString()
+    stdoutBuf += text
+    // Each newline-terminated line is potentially a QR string. With --qr-format text,
+    // QR is printed as a single line of variable length (often starts with "2@").
+    let nl: number
+    while ((nl = stdoutBuf.indexOf('\n')) !== -1) {
+      const line = stdoutBuf.slice(0, nl).trim()
+      stdoutBuf = stdoutBuf.slice(nl + 1)
+      if (!line) continue
+      if (line.length > 20 && (line.includes(',') || line.startsWith('2@'))) {
+        sess.qrText = line
+        sess.status = 'qr'
+        broadcast('qr', line)
+      }
+    }
+  })
+
+  child.stderr?.on('data', d => {
+    const text = d.toString()
+    stderrBuf += text
+    // Stderr carries NDJSON lifecycle events with --events.
+    let nl: number
+    while ((nl = stderrBuf.indexOf('\n')) !== -1) {
+      const line = stderrBuf.slice(0, nl).trim()
+      stderrBuf = stderrBuf.slice(nl + 1)
+      if (!line) continue
+      try {
+        const evt = JSON.parse(line)
+        if (typeof evt === 'object' && evt) {
+          if (evt.event === 'qr' && typeof evt.code === 'string') {
+            sess.qrText = evt.code
+            sess.status = 'qr'
+            broadcast('qr', evt.code)
+          } else if (evt.event === 'paired' || evt.event === 'logged_in' || evt.event === 'login_success') {
+            sess.status = 'paired'
+            broadcast('status', 'paired')
+          } else if (evt.event === 'error' || evt.event === 'pair_error') {
+            sess.status = 'error'
+            sess.errorMsg = evt.message ?? evt.error ?? 'unknown'
+            broadcast('status', `error:${sess.errorMsg}`)
+          } else if (evt.event === 'timeout') {
+            sess.status = 'timeout'
+            broadcast('status', 'timeout')
+          }
+        }
+      } catch {
+        // Not JSON — log as info, the human-readable wacli stderr
+        broadcast('log', line.slice(0, 300))
+      }
+    }
+  })
+
+  child.on('exit', code => {
+    if (sess.status !== 'paired' && sess.status !== 'error') {
+      // If process exited cleanly we consider it paired; non-zero treated as error
+      if (code === 0) {
+        sess.status = 'paired'
+        broadcast('status', 'paired')
+      } else {
+        sess.status = 'error'
+        sess.errorMsg = `process exited with code ${code}`
+        broadcast('status', `error:exited code ${code}`)
+      }
+    }
+    broadcast('close', String(code))
+    pairSessions.delete(projectId)
+  })
+  child.on('error', err => {
+    sess.status = 'error'
+    sess.errorMsg = String(err)
+    broadcast('status', `error:${err}`)
+  })
+
+  return { ok: true }
+}
+
+function stopPair(projectId: string): { ok: boolean } {
+  const sess = pairSessions.get(projectId)
+  if (!sess) return { ok: false }
+  try { sess.child.kill('SIGTERM') } catch {}
+  pairSessions.delete(projectId)
+  return { ok: true }
+}
+
+// ─── MCP & Tools (per-project) ─────────────────────────────────────────────
+
+function readExtraMcps(id: string): { mcpServers: Record<string, any> } {
+  const f = join(getStateDir(id), 'extra_mcps.json')
+  try {
+    const o = JSON.parse(readFileSync(f, 'utf8'))
+    if (o && o.mcpServers && typeof o.mcpServers === 'object') return o
+  } catch {}
+  return { mcpServers: {} }
+}
+
+function writeExtraMcps(id: string, data: { mcpServers: Record<string, any> }): void {
+  const path = join(getStateDir(id), 'extra_mcps.json')
+  writeJsonAtomic(path, data)
+}
+
+// ─── Trace WS ──────────────────────────────────────────────────────────────
+
+const wsClients = new Map<string, Set<any>>()
 
 function broadcastTraceLine(id: string, line: string): void {
   const set = wsClients.get(id)
@@ -428,7 +692,6 @@ function broadcastTraceLine(id: string, line: string): void {
   }
 }
 
-// Watch each project's trace.log; broadcast new lines to subscribed WS clients.
 const traceWatchers = new Map<string, { mtime: number; size: number }>()
 function startTraceWatchers(): void {
   setInterval(() => {
@@ -442,7 +705,6 @@ function startTraceWatchers(): void {
         continue
       }
       if (st.size > prev.size) {
-        // New content appended.
         try {
           const fd = require('fs').openSync(traceLog, 'r')
           const buf = Buffer.alloc(st.size - prev.size)
@@ -459,7 +721,9 @@ function startTraceWatchers(): void {
   }, 500)
 }
 
-// @ts-expect-error Bun global at runtime
+// ─── Server ────────────────────────────────────────────────────────────────
+
+// @ts-expect-error Bun global
 const server = (globalThis as any).Bun.serve({
   hostname: '127.0.0.1',
   port: PORT,
@@ -470,7 +734,6 @@ const server = (globalThis as any).Bun.serve({
       if (!id) return
       if (!wsClients.has(id)) wsClients.set(id, new Set())
       wsClients.get(id)!.add(ws)
-      // Send initial backlog
       for (const line of tailTrace(id, 50)) {
         try { ws.send(line) } catch {}
       }
@@ -485,7 +748,7 @@ const server = (globalThis as any).Bun.serve({
     const url = new URL(req.url)
     const p = url.pathname
 
-    // WebSocket upgrade for trace streaming
+    // WS upgrade for trace
     if (p.startsWith('/ws/projects/') && p.endsWith('/trace')) {
       const id = p.split('/')[3]
       if (!id || !existsSync(idToPath(id))) return notFound()
@@ -498,6 +761,35 @@ const server = (globalThis as any).Bun.serve({
     if (p === '/api/projects' && req.method === 'GET') {
       return json(discoverProjects())
     }
+    if (p === '/api/projects' && req.method === 'POST') {
+      const body = await req.json() as any
+      const result = createProject({
+        parentDir: body.parentDir ?? join(homedir(), 'Projects'),
+        name: body.name ?? '',
+        account: body.account ?? body.name ?? '',
+        template: body.template ?? 'eva',
+      })
+      return json(result, result.ok ? 200 : 400)
+    }
+
+    if (p === '/api/templates' && req.method === 'GET') {
+      return json(listTemplates())
+    }
+    const templateRead = p.match(/^\/api\/templates\/([^/]+)$/)
+    if (templateRead && req.method === 'GET') {
+      const t = readTemplateFiles(templateRead[1])
+      if (!t) return notFound()
+      return json(t)
+    }
+
+    // Default scan locations + suggested name (for wizard)
+    if (p === '/api/host-info' && req.method === 'GET') {
+      return json({
+        home: homedir(),
+        defaultParent: join(homedir(), 'Projects'),
+        existingProjectNames: discoverProjects().map(p => p.name),
+      })
+    }
 
     const projectMatch = p.match(/^\/api\/projects\/([^/]+)(\/.*)?$/)
     if (projectMatch) {
@@ -506,9 +798,58 @@ const server = (globalThis as any).Bun.serve({
       if (!existsSync(idToPath(id))) return notFound()
       const stateDir = getStateDir(id)
 
-      // GET /api/projects/:id
       if (sub === '' && req.method === 'GET') {
         return json(projectInfo(idToPath(id)))
+      }
+
+      // PAIR FLOW
+      if (sub === '/pair/start' && req.method === 'POST') {
+        return json(startPair(id))
+      }
+      if (sub === '/pair/stop' && req.method === 'POST') {
+        return json(stopPair(id))
+      }
+      if (sub === '/pair/stream' && req.method === 'GET') {
+        const sess = pairSessions.get(id)
+        if (!sess) return new Response('no active pair session', { status: 404 })
+
+        let queue: string[] = []
+        let pushFn: ((s: string) => void) | null = null
+        const subscriber = (s: string) => {
+          if (pushFn) pushFn(s); else queue.push(s)
+        }
+        sess.subscribers.add(subscriber)
+
+        const stream = new ReadableStream({
+          start(controller) {
+            const enc = new TextEncoder()
+            pushFn = (s: string) => {
+              try { controller.enqueue(enc.encode(s)) } catch {}
+            }
+            controller.enqueue(enc.encode(`event: status\ndata: ${sess.status}\n\n`))
+            if (sess.qrText) controller.enqueue(enc.encode(`event: qr\ndata: ${sess.qrText}\n\n`))
+            for (const m of queue) controller.enqueue(enc.encode(m))
+            queue = []
+            // heartbeat every 15s to keep connection alive
+            const hb = setInterval(() => {
+              try { controller.enqueue(enc.encode(`: heartbeat\n\n`)) } catch { clearInterval(hb) }
+            }, 15_000)
+            ;(this as any)._hb = hb
+          },
+          cancel() {
+            sess.subscribers.delete(subscriber)
+            const hb = (this as any)._hb
+            if (hb) clearInterval(hb)
+          },
+        })
+        return new Response(stream, {
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          },
+        })
       }
 
       // PERSONA
@@ -521,6 +862,10 @@ const server = (globalThis as any).Bun.serve({
         writeFileAtomic(join(stateDir, 'agent', `${personaWrite[1]}.md`), body)
         return json({ ok: true })
       }
+      if (sub === '/persona/apply-template' && req.method === 'POST') {
+        const body = await req.json() as { template: string }
+        return json(applyPersonaTemplate(id, body.template))
+      }
 
       // TUNABLES
       if (sub === '/tunables' && req.method === 'GET') {
@@ -528,7 +873,6 @@ const server = (globalThis as any).Bun.serve({
       }
       if (sub === '/tunables' && req.method === 'PUT') {
         const body = await req.json() as Tunables
-        // Filter to known keys + basic validation
         const cleaned: Tunables = {}
         for (const k of Object.keys(TUNABLES_DEFAULTS) as (keyof Tunables)[]) {
           if (body[k] !== undefined) (cleaned as any)[k] = body[k]
@@ -537,7 +881,7 @@ const server = (globalThis as any).Bun.serve({
         return json({ ok: true, tunables: { ...TUNABLES_DEFAULTS, ...cleaned } })
       }
 
-      // ACCESS / ALLOWLIST
+      // ACCESS
       if (sub === '/access' && req.method === 'GET') {
         return json(readJsonSafe(join(stateDir, 'access.json')) ?? { allowFrom: [] })
       }
@@ -559,7 +903,10 @@ const server = (globalThis as any).Bun.serve({
       if (contactRead && req.method === 'GET') {
         const jid = decodeURIComponent(contactRead[1])
         try { return json({ jid, content: readFileSync(join(stateDir, 'agent', 'contacts', `${jid}.md`), 'utf8') }) }
-        catch { return notFound() }
+        catch {
+          // Return empty so user can start writing
+          return json({ jid, content: '' })
+        }
       }
       if (contactRead && req.method === 'PUT') {
         const jid = decodeURIComponent(contactRead[1])
@@ -568,7 +915,7 @@ const server = (globalThis as any).Bun.serve({
         return json({ ok: true })
       }
 
-      // CONVERSATIONS (WhatsApp-native view: display name + last msg)
+      // CONVERSATIONS
       if (sub === '/conversations' && req.method === 'GET') {
         return json(listConversations(id))
       }
@@ -579,13 +926,13 @@ const server = (globalThis as any).Bun.serve({
         return json(fetchConversationMessages(id, jid, limit))
       }
 
-      // LIVE STATE (state machine snapshot the router writes)
+      // STATE
       if (sub === '/state' && req.method === 'GET') {
         try { return json(JSON.parse(readFileSync(join(stateDir, 'state.json'), 'utf8'))) }
         catch { return json({}) }
       }
 
-      // TURNS (per-invocation snapshots — see what Claude saw + did)
+      // TURNS
       if (sub === '/turns' && req.method === 'GET') {
         const limit = Number(url.searchParams.get('limit') ?? 30)
         return json(listTurns(id, limit))
@@ -595,7 +942,7 @@ const server = (globalThis as any).Bun.serve({
         return json(loadTurn(id, turnDetail[1]))
       }
 
-      // TRACE (one-shot tail; live updates via WS)
+      // TRACE
       if (sub === '/trace' && req.method === 'GET') {
         const lines = Number(url.searchParams.get('lines') ?? 200)
         return json({ lines: tailTrace(id, lines) })
@@ -607,6 +954,32 @@ const server = (globalThis as any).Bun.serve({
       }
       if (sub === '/router/stop' && req.method === 'POST') {
         return json(stopRouter(id))
+      }
+
+      // EXTRA MCPS
+      if (sub === '/mcps' && req.method === 'GET') {
+        return json(readExtraMcps(id))
+      }
+      if (sub === '/mcps' && req.method === 'PUT') {
+        const body = await req.json() as { mcpServers: Record<string, any> }
+        if (!body.mcpServers || typeof body.mcpServers !== 'object') {
+          return json({ ok: false, err: 'must be {mcpServers: {...}}' }, 400)
+        }
+        writeExtraMcps(id, body)
+        return json({ ok: true })
+      }
+
+      // PROJECT DELETE
+      if (sub === '' && req.method === 'DELETE') {
+        const projPath = idToPath(id)
+        // Stop router first, then nuke the .claude/cc-whatsapp dir only (leave project folder alone)
+        stopRouter(id)
+        try {
+          rmSync(join(projPath, '.claude', 'cc-whatsapp'), { recursive: true, force: true })
+          return json({ ok: true })
+        } catch (err) {
+          return json({ ok: false, err: String(err) }, 500)
+        }
       }
     }
 
@@ -638,7 +1011,6 @@ startTraceWatchers()
 process.stderr.write(`\n✓ cc-whatsapp dashboard on http://127.0.0.1:${PORT}\n`)
 process.stderr.write(`  open in browser, manage all your bots\n\n`)
 
-// Auto-open browser on first launch (macOS).
 if (process.platform === 'darwin' && process.env.CC_WHATSAPP_DASHBOARD_AUTO_OPEN !== '0') {
-  Bun.spawn(['open', `http://127.0.0.1:${PORT}/`], { stdio: ['ignore', 'ignore', 'ignore'] })
+  spawn('open', [`http://127.0.0.1:${PORT}/`], { stdio: ['ignore', 'ignore', 'ignore'] })
 }
