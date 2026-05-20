@@ -546,6 +546,19 @@ type PairSession = {
 }
 const pairSessions = new Map<string, PairSession>()   // key = projectId
 
+// Does cc-whatsapp's config already know about this account name?
+function accountExistsInConfig(account: string): boolean {
+  try {
+    const r = Bun.spawnSync({
+      cmd: [CC_WHATSAPP_BIN, 'accounts', 'list', '--json'],
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    const parsed = JSON.parse(new TextDecoder().decode(r.stdout))
+    const accounts: any[] = parsed?.data?.accounts ?? []
+    return accounts.some(a => a.name === account)
+  } catch { return false }
+}
+
 function startPair(projectId: string): { ok: boolean; err?: string } {
   if (pairSessions.has(projectId)) {
     return { ok: false, err: 'pair already running for this project (stop it first)' }
@@ -554,8 +567,15 @@ function startPair(projectId: string): { ok: boolean; err?: string } {
   const account = readJsonSafe(join(stateDir, 'config.json'))?.account
   if (!account) return { ok: false, err: 'no config.account' }
 
-  const args = ['--account', account, 'accounts', 'add', account, '--qr-format', 'text', '--events']
-  process.stderr.write(`[dashboard] spawning pair: ${CC_WHATSAPP_BIN} ${args.join(' ')}\n`)
+  // Route to the right command:
+  //   - account in config + already paired → no-op (re-pair only if user explicitly logged out)
+  //   - account in config, store empty (or expired)  → `auth` (just runs QR flow)
+  //   - account NOT in config                        → `accounts add` (registers + auths)
+  const exists = accountExistsInConfig(account)
+  const args = exists
+    ? ['--account', account, 'auth', '--qr-format', 'text', '--events']
+    : ['--account', account, 'accounts', 'add', account, '--qr-format', 'text', '--events']
+  process.stderr.write(`[dashboard] spawning pair (${exists ? 'auth' : 'accounts add'}): ${CC_WHATSAPP_BIN} ${args.join(' ')}\n`)
 
   let child: ChildProcess
   try {
