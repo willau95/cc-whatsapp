@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>cc-whatsapp · dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body class="bg-zinc-950 text-zinc-100 antialiased" x-data="dashboard()" x-init="init()">
+
+<!-- Top nav -->
+<nav class="border-b border-zinc-800 px-6 py-3 flex items-center gap-4">
+  <h1 class="text-lg font-mono">🌙 cc-whatsapp</h1>
+  <span class="text-xs text-zinc-500" x-text="`${projects.length} project(s) discovered`"></span>
+  <div class="flex-1"></div>
+  <button @click="refresh()" class="text-xs px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800">↻ refresh</button>
+</nav>
+
+<div class="flex h-[calc(100vh-3.5rem)]">
+
+  <!-- Left sidebar: project list -->
+  <aside class="w-72 border-r border-zinc-800 overflow-y-auto">
+    <template x-for="p in projects" :key="p.id">
+      <div
+        @click="select(p.id)"
+        :class="selectedId === p.id ? 'bg-zinc-800' : 'hover:bg-zinc-900'"
+        class="px-4 py-3 border-b border-zinc-900 cursor-pointer"
+      >
+        <div class="flex items-center gap-2">
+          <span :class="p.routerAlive ? 'text-emerald-400' : 'text-zinc-600'" class="text-xs">●</span>
+          <div class="font-mono text-sm" x-text="p.name"></div>
+        </div>
+        <div class="text-xs text-zinc-500 ml-4" x-text="'account: ' + p.account"></div>
+        <div class="text-xs text-zinc-500 ml-4">
+          <span x-text="p.allowFrom.length"></span> allowed ·
+          <span x-text="p.contactCount"></span> contacts
+        </div>
+      </div>
+    </template>
+    <div x-show="projects.length === 0" class="p-6 text-sm text-zinc-500">
+      No projects found. Create one with <code class="text-emerald-400">/cc-whatsapp:init</code> in a project.
+    </div>
+  </aside>
+
+  <!-- Main: project detail -->
+  <main class="flex-1 flex flex-col overflow-hidden">
+    <template x-if="!selected">
+      <div class="m-auto text-zinc-500 text-sm">← Pick a project</div>
+    </template>
+
+    <template x-if="selected">
+      <div class="flex flex-col h-full">
+
+        <!-- Project header -->
+        <header class="border-b border-zinc-800 px-6 py-4 flex items-center gap-4">
+          <div>
+            <div class="text-lg font-mono" x-text="selected.name"></div>
+            <div class="text-xs text-zinc-500 font-mono" x-text="selected.path"></div>
+          </div>
+          <div class="flex-1"></div>
+
+          <div class="flex items-center gap-2 text-sm">
+            <span :class="selected.routerAlive ? 'text-emerald-400' : 'text-zinc-600'">
+              ● <span x-text="selected.routerAlive ? 'router alive' : 'router stopped'"></span>
+            </span>
+            <button
+              x-show="!selected.routerAlive"
+              @click="startRouter()"
+              class="px-3 py-1 text-xs rounded bg-emerald-600 hover:bg-emerald-500 text-white"
+            >▶ start</button>
+            <button
+              x-show="selected.routerAlive"
+              @click="stopRouter()"
+              class="px-3 py-1 text-xs rounded bg-red-700 hover:bg-red-600 text-white"
+            >■ stop</button>
+          </div>
+        </header>
+
+        <!-- Tabs -->
+        <nav class="border-b border-zinc-800 px-6 flex gap-1">
+          <template x-for="t in tabs" :key="t">
+            <button
+              @click="activeTab = t"
+              :class="activeTab === t ? 'border-emerald-400 text-emerald-400' : 'border-transparent text-zinc-400 hover:text-zinc-200'"
+              class="px-4 py-3 text-sm border-b-2 -mb-px font-mono"
+              x-text="t"
+            ></button>
+          </template>
+        </nav>
+
+        <!-- Tab content -->
+        <div class="flex-1 overflow-y-auto p-6">
+
+          <!-- TUNABLES -->
+          <section x-show="activeTab === 'tunables'" class="space-y-6 max-w-2xl">
+            <p class="text-sm text-zinc-400">
+              Every humanlike behavior parameter. Saved to <code>tunables.json</code>; router reads on every turn so changes apply LIVE without restart.
+            </p>
+
+            <template x-for="(meta, key) in tunablesMeta" :key="key">
+              <div>
+                <label class="flex items-center justify-between mb-1">
+                  <span class="text-sm font-mono" x-text="key"></span>
+                  <span class="text-xs text-zinc-500" x-text="meta.unit"></span>
+                </label>
+                <p class="text-xs text-zinc-500 mb-2" x-text="meta.help"></p>
+                <div class="flex items-center gap-3">
+                  <input
+                    :type="meta.type"
+                    :step="meta.step"
+                    :min="meta.min"
+                    :max="meta.max"
+                    x-model.number="tunables[key]"
+                    @change="saveTunables()"
+                    class="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-700 rounded text-sm font-mono focus:border-emerald-400 outline-none"
+                  />
+                  <button
+                    @click="tunables[key] = meta.default; saveTunables()"
+                    class="text-xs text-zinc-500 hover:text-zinc-300"
+                  >reset</button>
+                </div>
+              </div>
+            </template>
+            <div x-show="tunablesSaved" class="text-emerald-400 text-xs">✓ saved</div>
+          </section>
+
+          <!-- PERSONA -->
+          <section x-show="activeTab === 'persona'" class="flex gap-4 h-full">
+            <aside class="w-48 space-y-1 shrink-0">
+              <template x-for="name in personaNames" :key="name">
+                <button
+                  @click="activePersonaFile = name"
+                  :class="activePersonaFile === name ? 'bg-zinc-800 text-emerald-400' : 'hover:bg-zinc-900'"
+                  class="block w-full text-left px-3 py-2 rounded text-sm font-mono"
+                  x-text="name"
+                ></button>
+              </template>
+            </aside>
+            <div class="flex-1 flex flex-col gap-3">
+              <p class="text-xs text-zinc-500">
+                Edit and ⌘+S to save. Persona files are loaded into Claude's system prompt on every turn.
+              </p>
+              <textarea
+                x-model="persona[activePersonaFile]"
+                @keydown.meta.s.prevent="savePersona()"
+                @keydown.ctrl.s.prevent="savePersona()"
+                class="flex-1 bg-zinc-900 border border-zinc-700 rounded p-3 text-sm font-mono leading-relaxed focus:border-emerald-400 outline-none whitespace-pre"
+                spellcheck="false"
+              ></textarea>
+              <div class="flex justify-end gap-2 text-xs">
+                <span x-show="personaSaved" class="text-emerald-400 self-center">✓ saved</span>
+                <button
+                  @click="savePersona()"
+                  class="px-4 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white"
+                >Save (⌘S)</button>
+              </div>
+            </div>
+          </section>
+
+          <!-- ALLOWLIST -->
+          <section x-show="activeTab === 'access'" class="max-w-2xl space-y-4">
+            <p class="text-sm text-zinc-400">
+              Allowed WhatsApp JIDs that can reach this bot. Re-read on every inbound msg — changes apply immediately.
+            </p>
+
+            <label class="flex items-center gap-2 text-sm">
+              <input type="checkbox" x-model="access.disabled" @change="saveAccess()" />
+              Bot disabled (kill switch — drops all inbound)
+            </label>
+
+            <ul class="space-y-1">
+              <template x-for="(jid, idx) in access.allowFrom" :key="idx">
+                <li class="flex items-center gap-2 py-1 px-3 bg-zinc-900 rounded">
+                  <code class="flex-1 text-sm" x-text="jid"></code>
+                  <button @click="removeJid(idx)" class="text-xs text-red-400 hover:text-red-300">×</button>
+                </li>
+              </template>
+            </ul>
+
+            <form @submit.prevent="addJid()" class="flex gap-2">
+              <input
+                x-model="newJid"
+                placeholder="1234567890@s.whatsapp.net or 123456789@lid"
+                class="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-700 rounded text-sm font-mono focus:border-emerald-400 outline-none"
+              />
+              <button class="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm">add</button>
+            </form>
+            <div x-show="accessSaved" class="text-emerald-400 text-xs">✓ saved</div>
+          </section>
+
+          <!-- CONTACTS -->
+          <section x-show="activeTab === 'contacts'" class="flex gap-4 h-full">
+            <aside class="w-72 shrink-0 overflow-y-auto space-y-1">
+              <p class="text-xs text-zinc-500 px-2 py-1" x-text="`${contacts.length} contact memory files`"></p>
+              <template x-for="c in contacts" :key="c.jid">
+                <button
+                  @click="loadContact(c.jid)"
+                  :class="activeContact === c.jid ? 'bg-zinc-800 text-emerald-400' : 'hover:bg-zinc-900'"
+                  class="block w-full text-left px-3 py-2 rounded text-xs font-mono break-all"
+                >
+                  <div x-text="c.jid"></div>
+                  <div class="text-zinc-500" x-text="new Date(c.mtime).toLocaleString() + ' · ' + c.size + 'B'"></div>
+                </button>
+              </template>
+            </aside>
+            <div class="flex-1 flex flex-col gap-3">
+              <template x-if="activeContact">
+                <div class="flex flex-col h-full gap-3">
+                  <p class="text-xs text-zinc-500">
+                    Contact memory · <code x-text="activeContact"></code> · auto-read by Claude before every reply, auto-edited after meaningful turns.
+                  </p>
+                  <textarea
+                    x-model="contactContent"
+                    @keydown.meta.s.prevent="saveContact()"
+                    @keydown.ctrl.s.prevent="saveContact()"
+                    class="flex-1 bg-zinc-900 border border-zinc-700 rounded p-3 text-sm font-mono leading-relaxed focus:border-emerald-400 outline-none whitespace-pre"
+                    spellcheck="false"
+                  ></textarea>
+                  <div class="flex justify-end text-xs">
+                    <span x-show="contactSaved" class="text-emerald-400 self-center mr-2">✓ saved</span>
+                    <button
+                      @click="saveContact()"
+                      class="px-4 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white"
+                    >Save (⌘S)</button>
+                  </div>
+                </div>
+              </template>
+              <template x-if="!activeContact">
+                <div class="m-auto text-zinc-500 text-sm">← pick a contact</div>
+              </template>
+            </div>
+          </section>
+
+          <!-- LIVE TRACE -->
+          <section x-show="activeTab === 'trace'" class="h-full flex flex-col">
+            <div class="flex items-center gap-2 mb-2">
+              <span :class="wsConnected ? 'text-emerald-400' : 'text-zinc-500'" class="text-xs">●</span>
+              <span class="text-xs text-zinc-500" x-text="wsConnected ? 'streaming live' : 'reconnecting…'"></span>
+              <div class="flex-1"></div>
+              <button @click="traceLines = []" class="text-xs text-zinc-500 hover:text-zinc-300">clear</button>
+            </div>
+            <div
+              x-ref="traceBox"
+              class="flex-1 overflow-y-auto bg-zinc-900 border border-zinc-800 rounded p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap"
+            >
+              <template x-for="line in traceLines" :key="line.id">
+                <div x-text="line.text" :class="traceLineClass(line.text)"></div>
+              </template>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </template>
+  </main>
+</div>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

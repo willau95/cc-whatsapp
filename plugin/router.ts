@@ -63,10 +63,36 @@ function loadProjectConfig(): { account?: string } {
 }
 const WACLI_ACCOUNT = loadProjectConfig().account ?? 'main'
 
-// ─── Humanlike batching timings (env-overridable for testing) ───
-const COLLECT_WINDOW_MS = Number(process.env.CC_WHATSAPP_COLLECT_WINDOW_MS ?? 60_000)
-const PRE_REPLY_MIN_MS  = Number(process.env.CC_WHATSAPP_PRE_REPLY_MIN_MS  ?? 30_000)
-const PRE_REPLY_MAX_MS  = Number(process.env.CC_WHATSAPP_PRE_REPLY_MAX_MS  ?? 60_000)
+// ─── Tunables (re-read from disk every time so dashboard edits go live) ───
+// tunables.json overrides env-var defaults. Dashboard writes it; we read it.
+const TUNABLES_FILE = join(STATE_DIR, 'tunables.json')
+type Tunables = {
+  collect_window_ms: number
+  pre_reply_min_ms: number
+  pre_reply_max_ms: number
+  quote_reply_probability: number
+  multi_msg_max_segments: number
+  inter_segment_min_ms: number
+  inter_segment_max_ms: number
+  chat_model: string
+  dry_run: boolean
+}
+function tunables(): Tunables {
+  let stored: Partial<Tunables> = {}
+  try { stored = JSON.parse(readFileSync(TUNABLES_FILE, 'utf8')) } catch {}
+  return {
+    collect_window_ms: stored.collect_window_ms ?? Number(process.env.CC_WHATSAPP_COLLECT_WINDOW_MS ?? 60_000),
+    pre_reply_min_ms:  stored.pre_reply_min_ms  ?? Number(process.env.CC_WHATSAPP_PRE_REPLY_MIN_MS  ?? 30_000),
+    pre_reply_max_ms:  stored.pre_reply_max_ms  ?? Number(process.env.CC_WHATSAPP_PRE_REPLY_MAX_MS  ?? 60_000),
+    quote_reply_probability: stored.quote_reply_probability ?? 0.4,
+    multi_msg_max_segments:  stored.multi_msg_max_segments  ?? 4,
+    inter_segment_min_ms:    stored.inter_segment_min_ms    ?? 800,
+    inter_segment_max_ms:    stored.inter_segment_max_ms    ?? 2200,
+    chat_model: stored.chat_model ?? (process.env.CC_WHATSAPP_CHAT_MODEL ?? 'claude-haiku-4-5-20251001'),
+    dry_run: process.env.CC_WHATSAPP_DRY_RUN === '1',
+  }
+}
+// Legacy aliases (referenced elsewhere; resolve fresh each call)
 const DRY_RUN = process.env.CC_WHATSAPP_DRY_RUN === '1'
 
 // ─── persona system prompt (loaded once at startup) ───
@@ -315,7 +341,7 @@ function spawnClaude(jid: string, prompt: string, onExit?: () => void): void {
   const sessFlag = sess.isNew ? ['--session-id', sess.uuid] : ['--resume', sess.uuid]
   const args = [
     '-p',
-    '--model', CHAT_MODEL,
+    '--model', tunables().chat_model,
     '--mcp-config', MCP_JSON,
     '--dangerously-skip-permissions',
     '--strict-mcp-config',
@@ -400,14 +426,15 @@ function enqueueMessage(jid: string, evt: any): void {
   }
 
   p.state = 'COLLECTING'
-  p.timer = setTimeout(() => closeCollectWindow(jid), COLLECT_WINDOW_MS)
+  p.timer = setTimeout(() => closeCollectWindow(jid), tunables().collect_window_ms)
 }
 
 function closeCollectWindow(jid: string): void {
   const p = getPending(jid)
   p.timer = null
   if (p.batch.length === 0) { p.state = 'IDLE'; return }
-  const preDelay = PRE_REPLY_MIN_MS + Math.floor(Math.random() * Math.max(1, PRE_REPLY_MAX_MS - PRE_REPLY_MIN_MS))
+  const t = tunables()
+  const preDelay = t.pre_reply_min_ms + Math.floor(Math.random() * Math.max(1, t.pre_reply_max_ms - t.pre_reply_min_ms))
   p.state = 'PRE_REPLY'
   trace('collect_closed_pre_reply', { jid, batchSize: p.batch.length, preDelayMs: preDelay })
   p.timer = setTimeout(() => triggerClaude(jid), preDelay)
@@ -448,7 +475,7 @@ function onClaudeExit(jid: string): void {
   // Msgs arrived during claude's run — start a fresh COLLECT window for them.
   trace('claude_done_pending_batch', { jid, batchSize: p.batch.length })
   p.state = 'COLLECTING'
-  p.timer = setTimeout(() => closeCollectWindow(jid), COLLECT_WINDOW_MS)
+  p.timer = setTimeout(() => closeCollectWindow(jid), tunables().collect_window_ms)
 }
 
 // Build a prompt that wraps every msg in the batch as a <whatsapp> tag, then
@@ -470,11 +497,14 @@ async function buildBatchPrompt(jid: string, batch: any[]): Promise<string | nul
 
   const trailer: string[] = []
   trailer.push(`Contact file: ${contactFile} (${contactExists ? 'exists — Read it first to recall who this is' : 'does NOT exist yet — copy TEMPLATE.md to this path and fill in basic info from PushName + any context you learn'})`)
+  const t = tunables()
+  const quotePct = Math.round(t.quote_reply_probability * 100)
+  const maxSeg = t.multi_msg_max_segments
   if (batch.length > 1) {
-    trailer.push(`The user sent ${batch.length} messages in a short burst. Treat them as ONE combined turn from them. Reply ONCE — you may use multiple reply tool calls to split into 2-4 natural messages, but it's one response to the whole burst.`)
-    trailer.push(`Quote-reply guidance: about 30-50% of the time, pick ONE message in the burst and quote-reply it by passing reply_to=<message_id> in ONE of your reply calls — pick a message that benefits from the disambiguation (e.g., a specific question among several). Don't quote-reply just to be flashy; if a flat reply reads naturally, do that.`)
+    trailer.push(`The user sent ${batch.length} messages in a short burst. Treat them as ONE combined turn from them. Reply ONCE — you may use multiple reply tool calls to split into ${maxSeg <= 2 ? '1-2' : `2-${maxSeg}`} natural messages, but it's one response to the whole burst.`)
+    trailer.push(`Quote-reply guidance: about ${quotePct}% of the time, pick ONE message in the burst and quote-reply it by passing reply_to=<message_id> in ONE of your reply calls — pick a message that benefits from the disambiguation. Don't quote-reply just to be flashy.`)
   } else {
-    trailer.push(`Reply via the reply tool. If your reply is long, split into 2-4 calls for natural multi-segment delivery.`)
+    trailer.push(`Reply via the reply tool. If your reply is long, split into up to ${maxSeg} calls for natural multi-segment delivery.`)
   }
   if (fragments.some(f => f.includes('image_path='))) {
     trailer.push(`One or more messages have image_path attached — Read each one to view the image, then reply.`)

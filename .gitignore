@@ -7,6 +7,7 @@ plugin/bun.lock
 # Runtime state (should never be in repo — these are per-consumer-project)
 **/access.json
 **/sessions.json
+**/tunables.json
 **/.secret
 **/trace.log
 **/router.pid

@@ -160,12 +160,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const files = Array.isArray(args.files) ? (args.files as unknown[]).map(String) : []
       assertAllowed(jid)
 
-      // Humanlike pre-send delay: random, scaled by text length.
-      // Short msgs feel snappier; long msgs feel like real typing.
+      // Humanlike pre-send delay. Range comes from tunables.json (dashboard-tunable),
+      // then scaled UP by text length so longer msgs feel like more typing time.
+      let baseMin = 800, baseMax = 2200
+      try {
+        const t = JSON.parse(readFileSync(join(STATE_DIR, 'tunables.json'), 'utf8'))
+        if (typeof t.inter_segment_min_ms === 'number') baseMin = t.inter_segment_min_ms
+        if (typeof t.inter_segment_max_ms === 'number') baseMax = t.inter_segment_max_ms
+      } catch {}
       const len = text.length
-      const min = len < 20 ? 300 : len < 100 ? 800 : 1500
-      const max = len < 20 ? 900 : len < 100 ? 2200 : 3500
-      const delay = min + Math.floor(Math.random() * (max - min))
+      const lengthFactor = len < 20 ? 0.5 : len < 100 ? 1.0 : 1.6
+      const min = Math.round(baseMin * lengthFactor)
+      const max = Math.round(baseMax * lengthFactor)
+      const delay = min + Math.floor(Math.random() * Math.max(1, max - min))
       await new Promise(r => setTimeout(r, delay))
 
       const sent: string[] = []
