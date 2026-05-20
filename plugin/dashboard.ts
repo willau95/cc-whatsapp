@@ -601,6 +601,12 @@ function startPair(projectId: string): { ok: boolean; err?: string } {
     const text = d.toString()
     stderrBuf += text
     // Stderr carries NDJSON lifecycle events with --events.
+    // Real format (verified empirically):
+    //   {"event":"qr_code","data":{"code":"2@..."},"ts":...}
+    //   {"event":"warning","data":{"code":"sync_storage_uncapped","message":"..."}}
+    //   {"event":"error","data":{"message":"..."},"ts":...}
+    //   {"event":"login_success",...}  // assumed
+    //   {"event":"auth_starting",...}
     let nl: number
     while ((nl = stderrBuf.indexOf('\n')) !== -1) {
       const line = stderrBuf.slice(0, nl).trim()
@@ -608,25 +614,27 @@ function startPair(projectId: string): { ok: boolean; err?: string } {
       if (!line) continue
       try {
         const evt = JSON.parse(line)
-        if (typeof evt === 'object' && evt) {
-          if (evt.event === 'qr' && typeof evt.code === 'string') {
-            sess.qrText = evt.code
-            sess.status = 'qr'
-            broadcast('qr', evt.code)
-          } else if (evt.event === 'paired' || evt.event === 'logged_in' || evt.event === 'login_success') {
-            sess.status = 'paired'
-            broadcast('status', 'paired')
-          } else if (evt.event === 'error' || evt.event === 'pair_error') {
-            sess.status = 'error'
-            sess.errorMsg = evt.message ?? evt.error ?? 'unknown'
-            broadcast('status', `error:${sess.errorMsg}`)
-          } else if (evt.event === 'timeout') {
-            sess.status = 'timeout'
-            broadcast('status', 'timeout')
-          }
+        if (!evt || typeof evt !== 'object') continue
+        const name: string = evt.event ?? ''
+        const code: string | undefined = evt.data?.code
+        const msg: string | undefined = evt.data?.message
+        process.stderr.write(`[pair:${sess.account}] ${name} ${code ? '(code: ' + String(code).slice(0,40) + '...)' : ''} ${msg ?? ''}\n`)
+        if (name === 'qr_code' && typeof code === 'string' && code.length > 10) {
+          sess.qrText = code
+          sess.status = 'qr'
+          broadcast('qr', code)
+        } else if (name === 'login_success' || name === 'paired' || name === 'logged_in' || name === 'auth_complete' || name === 'authenticated' || name === 'pair_success') {
+          sess.status = 'paired'
+          broadcast('status', 'paired')
+        } else if (name === 'error' || name === 'pair_error' || name === 'auth_failed') {
+          sess.status = 'error'
+          sess.errorMsg = msg ?? code ?? 'unknown'
+          broadcast('status', `error:${sess.errorMsg}`)
+        } else if (name === 'timeout' || name === 'auth_timeout') {
+          sess.status = 'timeout'
+          broadcast('status', 'timeout')
         }
       } catch {
-        // Not JSON — log as info, the human-readable wacli stderr
         broadcast('log', line.slice(0, 300))
       }
     }

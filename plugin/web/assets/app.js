@@ -174,11 +174,13 @@ function app() {
       pairStatus: 'idle',
       pairError: '',
       pairAlreadyDone: false,
+      qrDataUrl: '',         // populated by renderQrToState
+      qrTextDebug: '',       // shown in <details> for debugging
       eventSource: null,
     },
 
     // ─── pair modal (re-pair) ───
-    pairModal: { open: false, status: 'idle', error: '', eventSource: null },
+    pairModal: { open: false, status: 'idle', error: '', qrDataUrl: '', eventSource: null },
 
     // ─── ui state ───
     toast: null,
@@ -650,6 +652,8 @@ function app() {
     async wizardStartPair() {
       this.wizard.pairStatus = 'starting'
       this.wizard.pairError = ''
+      this.wizard.qrDataUrl = ''
+      this.wizard.qrTextDebug = ''
       const startRes = await fetch(`/api/projects/${this.wizard.newProjectId}/pair/start`, { method: 'POST' })
       const startData = await startRes.json()
       if (!startData.ok) {
@@ -659,9 +663,15 @@ function app() {
       }
       const es = new EventSource(`/api/projects/${this.wizard.newProjectId}/pair/stream`)
       this.wizard.eventSource = es
-      es.addEventListener('qr', (e) => {
+      es.addEventListener('qr', async (e) => {
         this.wizard.pairStatus = 'qr'
-        this.$nextTick(() => this.renderQr(this.$refs.wizardQrCanvas, e.data))
+        this.wizard.qrTextDebug = `len=${e.data.length} preview=${e.data.slice(0, 48)}…`
+        try {
+          this.wizard.qrDataUrl = await this.qrToDataUrl(e.data)
+        } catch (err) {
+          console.error('wizard QR render failed', err)
+          this.wizard.pairError = 'QR render failed: ' + err
+        }
       })
       es.addEventListener('status', (e) => {
         const d = e.data
@@ -675,7 +685,8 @@ function app() {
           this.wizard.pairStatus = 'timeout'
         }
       })
-      es.onerror = () => {}
+      es.addEventListener('log', (e) => { console.debug('[pair log]', e.data) })
+      es.onerror = (err) => { console.warn('SSE error (will reconnect)', err) }
     },
     async wizardRetryPair() {
       if (this.wizard.eventSource) { try { this.wizard.eventSource.close() } catch {} }
@@ -685,7 +696,7 @@ function app() {
 
     // ─── re-pair modal ───
     async openPair() {
-      this.pairModal = { open: true, status: 'starting', error: '', eventSource: null }
+      this.pairModal = { open: true, status: 'starting', error: '', qrDataUrl: '', eventSource: null }
       const startRes = await fetch(`/api/projects/${this.selectedId}/pair/start`, { method: 'POST' })
       const startData = await startRes.json()
       if (!startData.ok) {
@@ -695,9 +706,14 @@ function app() {
       }
       const es = new EventSource(`/api/projects/${this.selectedId}/pair/stream`)
       this.pairModal.eventSource = es
-      es.addEventListener('qr', (e) => {
+      es.addEventListener('qr', async (e) => {
         this.pairModal.status = 'qr'
-        this.$nextTick(() => this.renderQr(this.$refs.pairQrCanvas, e.data))
+        try {
+          this.pairModal.qrDataUrl = await this.qrToDataUrl(e.data)
+        } catch (err) {
+          console.error('pair QR render failed', err)
+          this.pairModal.error = 'QR render failed: ' + err
+        }
       })
       es.addEventListener('status', (e) => {
         const d = e.data
@@ -709,24 +725,25 @@ function app() {
           this.pairModal.error = d.slice(6)
         }
       })
+      es.addEventListener('log', (e) => { console.debug('[pair log]', e.data) })
     },
     closePair() {
       if (this.pairModal.eventSource) { try { this.pairModal.eventSource.close() } catch {} }
       if (this.pairModal.status !== 'paired') {
         fetch(`/api/projects/${this.selectedId}/pair/stop`, { method: 'POST' }).catch(() => {})
       }
-      this.pairModal = { open: false, status: 'idle', error: '', eventSource: null }
+      this.pairModal = { open: false, status: 'idle', error: '', qrDataUrl: '', eventSource: null }
     },
 
-    renderQr(canvas, text) {
-      if (!canvas || !text) return
-      try {
-        window.QRCode.toCanvas(canvas, text, { width: 280, margin: 2, errorCorrectionLevel: 'M' }, (err) => {
-          if (err) console.error('QR render failed', err)
+    // Renders QR to a data: URL (works in img tag — no canvas timing problems).
+    qrToDataUrl(text) {
+      if (!text) return Promise.reject(new Error('empty QR text'))
+      if (!window.QRCode) return Promise.reject(new Error('QRCode lib not loaded'))
+      return new Promise((resolve, reject) => {
+        window.QRCode.toDataURL(text, { width: 280, margin: 2, errorCorrectionLevel: 'M' }, (err, url) => {
+          if (err) reject(err); else resolve(url)
         })
-      } catch (err) {
-        console.error('QRCode lib not loaded', err)
-      }
+      })
     },
 
     // ─── project delete ───

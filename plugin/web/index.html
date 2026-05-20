@@ -706,8 +706,14 @@
         <p class="text-sm text-zinc-400">
           Scan this QR with WhatsApp → ⚙️ Settings → Linked Devices → Link a Device.
         </p>
-        <div class="flex justify-center bg-white p-6 rounded-xl">
-          <canvas x-ref="wizardQrCanvas" width="280" height="280"></canvas>
+        <div class="flex justify-center bg-white p-6 rounded-xl min-h-[300px] items-center">
+          <img x-ref="wizardQrImg" x-show="wizard.qrDataUrl" :src="wizard.qrDataUrl" alt="WhatsApp QR" class="w-64 h-64" />
+          <div x-show="!wizard.qrDataUrl && wizard.pairStatus !== 'paired'" class="text-zinc-400 text-sm">
+            <span x-show="wizard.pairStatus === 'starting'">⏳ generating QR…</span>
+            <span x-show="wizard.pairStatus === 'error'" class="text-red-600" x-text="wizard.pairError"></span>
+            <span x-show="wizard.pairStatus === 'qr' && !wizard.qrDataUrl">rendering QR…</span>
+          </div>
+          <div x-show="wizard.pairStatus === 'paired'" class="text-emerald-600 text-2xl">✓ Linked!</div>
         </div>
         <div class="text-center text-sm">
           <div x-show="wizard.pairStatus === 'starting'" class="text-zinc-400">⏳ generating QR…</div>
@@ -719,6 +725,10 @@
         <div x-show="wizard.pairStatus === 'qr'" class="text-xs text-zinc-500 text-center">
           QR rotates every ~20s — page auto-updates
         </div>
+        <details x-show="wizard.qrTextDebug" class="text-xs text-zinc-600">
+          <summary class="cursor-pointer hover:text-zinc-400">debug · QR payload</summary>
+          <p class="mt-1 break-all font-mono" x-text="wizard.qrTextDebug"></p>
+        </details>
       </div>
 
       <!-- Step 4: Done -->
@@ -771,8 +781,9 @@
     </header>
     <div class="p-6 space-y-4">
       <p class="text-sm text-zinc-400">Scan with WhatsApp → ⚙️ Settings → Linked Devices → Link a Device.</p>
-      <div class="flex justify-center bg-white p-6 rounded-xl">
-        <canvas x-ref="pairQrCanvas" width="280" height="280"></canvas>
+      <div class="flex justify-center bg-white p-6 rounded-xl min-h-[300px] items-center">
+        <img x-show="pairModal.qrDataUrl" :src="pairModal.qrDataUrl" alt="WhatsApp QR" class="w-64 h-64" />
+        <div x-show="!pairModal.qrDataUrl" class="text-zinc-400 text-sm">⏳ generating QR…</div>
       </div>
       <div class="text-center text-sm">
         <div x-show="pairModal.status === 'starting'" class="text-zinc-400">⏳ generating QR…</div>
