@@ -607,6 +607,227 @@
         </div>
       </section>
 
+      <!-- ─────── CLAUDE CODE NATIVE (CLAUDE.md / Skills / Subagents / Commands) ─────── -->
+      <section x-show="activeTab === 'claude-native' && selected" class="flex flex-col h-full">
+        <div class="border-b border-zinc-800 px-6 py-3 flex items-center gap-2 shrink-0">
+          <button @click="ccLoadSubTab('claude-md')"
+                  :class="cc.subTab === 'claude-md' ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'"
+                  class="px-3 py-1.5 text-sm rounded">CLAUDE.md</button>
+          <button @click="ccLoadSubTab('skills')"
+                  :class="cc.subTab === 'skills' ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'"
+                  class="px-3 py-1.5 text-sm rounded">Skills</button>
+          <button @click="ccLoadSubTab('subagents')"
+                  :class="cc.subTab === 'subagents' ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'"
+                  class="px-3 py-1.5 text-sm rounded">Subagents</button>
+          <button @click="ccLoadSubTab('commands')"
+                  :class="cc.subTab === 'commands' ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'"
+                  class="px-3 py-1.5 text-sm rounded">Commands</button>
+          <div class="flex-1"></div>
+          <span class="text-xs text-zinc-500">Files in your bot's <code class="text-zinc-400">cwd/CLAUDE.md</code> and <code class="text-zinc-400">cwd/.claude/</code> — Claude Code auto-loads on every turn.</span>
+        </div>
+
+        <!-- ── CLAUDE.md sub-panel ── -->
+        <div x-show="cc.subTab === 'claude-md'" class="p-6 flex-1 flex flex-col min-h-0">
+          <p class="text-sm text-zinc-400 mb-3">
+            Project-level memory. Appended to the system prompt on every chatbot turn. Keep small — for big knowledge use <strong>Skills</strong>.
+          </p>
+          <textarea x-model="cc.claudeMdDraft"
+                    class="flex-1 bg-zinc-950 border border-zinc-800 rounded p-3 font-mono text-sm outline-none resize-none"
+                    spellcheck="false"
+                    placeholder="# Your bot's project context goes here..."></textarea>
+          <div class="mt-3 flex gap-2 justify-end">
+            <button @click="cc.claudeMdDraft = cc.claudeMdSaved"
+                    :disabled="cc.claudeMdDraft === cc.claudeMdSaved"
+                    class="px-3 py-1.5 bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed rounded text-sm">Discard</button>
+            <button @click="ccSaveClaudeMd()"
+                    :disabled="cc.claudeMdDraft === cc.claudeMdSaved"
+                    class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed rounded text-sm">Save</button>
+          </div>
+        </div>
+
+        <!-- ── Skills sub-panel ── -->
+        <div x-show="cc.subTab === 'skills'" class="flex-1 flex min-h-0">
+          <div class="w-64 border-r border-zinc-800 overflow-y-auto shrink-0">
+            <div class="p-3 border-b border-zinc-800 flex justify-between items-center">
+              <span class="text-sm font-medium">Skills</span>
+              <button @click="cc.newSkillForm = { open: true, name: '', content: '' }; cc.selectedSkill = ''"
+                      class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded">+ New</button>
+            </div>
+            <div x-show="cc.skillsList.length === 0" class="p-3 text-xs text-zinc-500">
+              No skills yet. Skills load on-demand when Claude judges the user's message relevant — ideal for large knowledge bases (no per-turn token cost when unused).
+            </div>
+            <template x-for="s in cc.skillsList" :key="s.name">
+              <button @click="cc.newSkillForm.open = false; ccSelectSkill(s.name)"
+                      :class="cc.selectedSkill === s.name ? 'bg-zinc-800' : ''"
+                      class="w-full text-left p-3 border-b border-zinc-900 hover:bg-zinc-800/60">
+                <div class="font-medium text-sm" x-text="s.name"></div>
+                <div class="text-xs text-zinc-500 truncate" x-text="s.description || '(no description)'"></div>
+                <div class="text-xs text-zinc-600 mt-1" x-text="s.fileCount + ' file' + (s.fileCount === 1 ? '' : 's')"></div>
+              </button>
+            </template>
+          </div>
+          <div class="flex-1 p-6 flex flex-col min-h-0 overflow-y-auto">
+            <div x-show="cc.newSkillForm.open">
+              <h3 class="font-medium mb-3">New Skill</h3>
+              <input x-model="cc.newSkillForm.name" placeholder="name (a-z 0-9 _ -)"
+                     class="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-sm mb-3 outline-none">
+              <p class="text-xs text-zinc-500 mb-2">SKILL.md content (starts with YAML frontmatter; <code>description</code> tells Claude when to load it):</p>
+              <textarea x-model="cc.newSkillForm.content" rows="14"
+                        class="w-full bg-zinc-950 border border-zinc-800 rounded p-3 font-mono text-sm outline-none"
+                        placeholder="---&#10;description: When the user asks about X, load this skill&#10;---&#10;&#10;Use this skill to..."></textarea>
+              <div class="mt-3 flex gap-2 justify-end">
+                <button @click="cc.newSkillForm = { open: false, name: '', content: '' }"
+                        class="px-3 py-1.5 bg-zinc-700 rounded text-sm">Cancel</button>
+                <button @click="ccCreateSkill()"
+                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-sm">Create</button>
+              </div>
+            </div>
+            <div x-show="!cc.newSkillForm.open && !cc.selectedSkill" class="text-zinc-500 text-sm">
+              Select a skill on the left to edit, or click <strong>+ New</strong>.
+            </div>
+            <div x-show="!cc.newSkillForm.open && cc.selectedSkill" class="flex-1 flex flex-col min-h-0">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="font-medium" x-text="'Skill: ' + cc.selectedSkill"></h3>
+                <button @click="ccDeleteSkill(cc.selectedSkill)"
+                        class="text-xs px-2 py-1 bg-red-600/20 text-red-400 hover:bg-red-600/40 rounded">Delete skill</button>
+              </div>
+              <p class="text-xs text-zinc-500 mb-2">
+                Editing <code class="text-zinc-400">SKILL.md</code>.
+                <span x-show="cc.skillSaved && cc.skillSaved.files && cc.skillSaved.files.length > 1"
+                      x-text="'Also has ' + (cc.skillSaved.files.length - 1) + ' helper file(s), preserved on save.'"></span>
+              </p>
+              <textarea x-model="cc.skillMdDraft"
+                        class="flex-1 min-h-[300px] bg-zinc-950 border border-zinc-800 rounded p-3 font-mono text-sm outline-none resize-none"
+                        spellcheck="false"></textarea>
+              <div class="mt-3 flex gap-2 justify-end">
+                <button @click="ccSelectSkill(cc.selectedSkill)"
+                        class="px-3 py-1.5 bg-zinc-700 rounded text-sm">Discard</button>
+                <button @click="ccSaveSkill()"
+                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-sm">Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Subagents sub-panel ── -->
+        <div x-show="cc.subTab === 'subagents'" class="flex-1 flex min-h-0">
+          <div class="w-64 border-r border-zinc-800 overflow-y-auto shrink-0">
+            <div class="p-3 border-b border-zinc-800 flex justify-between items-center">
+              <span class="text-sm font-medium">Subagents</span>
+              <button @click="cc.newAgentForm = { open: true, name: '', content: '' }; cc.selectedAgent = ''"
+                      class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded">+ New</button>
+            </div>
+            <div x-show="cc.agentsList.length === 0" class="p-3 text-xs text-zinc-500">
+              No subagents yet. Subagents let your bot delegate sub-tasks to specialized personas.
+            </div>
+            <template x-for="a in cc.agentsList" :key="a.name">
+              <button @click="cc.newAgentForm.open = false; ccSelectAgent(a.name)"
+                      :class="cc.selectedAgent === a.name ? 'bg-zinc-800' : ''"
+                      class="w-full text-left p-3 border-b border-zinc-900 hover:bg-zinc-800/60">
+                <div class="font-medium text-sm" x-text="a.name"></div>
+                <div class="text-xs text-zinc-500 truncate" x-text="a.description || '(no description)'"></div>
+              </button>
+            </template>
+          </div>
+          <div class="flex-1 p-6 flex flex-col min-h-0 overflow-y-auto">
+            <div x-show="cc.newAgentForm.open">
+              <h3 class="font-medium mb-3">New Subagent</h3>
+              <input x-model="cc.newAgentForm.name" placeholder="name (a-z 0-9 _ -)"
+                     class="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-sm mb-3 outline-none">
+              <textarea x-model="cc.newAgentForm.content" rows="14"
+                        class="w-full bg-zinc-950 border border-zinc-800 rounded p-3 font-mono text-sm outline-none"
+                        placeholder="(leave empty for a starter template)"></textarea>
+              <div class="mt-3 flex gap-2 justify-end">
+                <button @click="cc.newAgentForm = { open: false, name: '', content: '' }"
+                        class="px-3 py-1.5 bg-zinc-700 rounded text-sm">Cancel</button>
+                <button @click="ccCreateAgent()"
+                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-sm">Create</button>
+              </div>
+            </div>
+            <div x-show="!cc.newAgentForm.open && !cc.selectedAgent" class="text-zinc-500 text-sm">
+              Select a subagent on the left or click <strong>+ New</strong>.
+            </div>
+            <div x-show="!cc.newAgentForm.open && cc.selectedAgent" class="flex-1 flex flex-col min-h-0">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="font-medium" x-text="'Subagent: ' + cc.selectedAgent"></h3>
+                <button @click="ccDeleteAgent(cc.selectedAgent)"
+                        class="text-xs px-2 py-1 bg-red-600/20 text-red-400 hover:bg-red-600/40 rounded">Delete</button>
+              </div>
+              <textarea x-model="cc.agentDraft"
+                        class="flex-1 min-h-[300px] bg-zinc-950 border border-zinc-800 rounded p-3 font-mono text-sm outline-none resize-none"
+                        spellcheck="false"></textarea>
+              <div class="mt-3 flex gap-2 justify-end">
+                <button @click="cc.agentDraft = cc.agentSaved"
+                        :disabled="cc.agentDraft === cc.agentSaved"
+                        class="px-3 py-1.5 bg-zinc-700 disabled:opacity-30 rounded text-sm">Discard</button>
+                <button @click="ccSaveAgent()"
+                        :disabled="cc.agentDraft === cc.agentSaved"
+                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 rounded text-sm">Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Commands sub-panel ── -->
+        <div x-show="cc.subTab === 'commands'" class="flex-1 flex min-h-0">
+          <div class="w-64 border-r border-zinc-800 overflow-y-auto shrink-0">
+            <div class="p-3 border-b border-zinc-800 flex justify-between items-center">
+              <span class="text-sm font-medium">Slash Commands</span>
+              <button @click="cc.newCommandForm = { open: true, name: '', content: '' }; cc.selectedCommand = ''"
+                      class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded">+ New</button>
+            </div>
+            <div x-show="cc.commandsList.length === 0" class="p-3 text-xs text-zinc-500">
+              No slash commands yet.
+            </div>
+            <template x-for="c in cc.commandsList" :key="c.name">
+              <button @click="cc.newCommandForm.open = false; ccSelectCommand(c.name)"
+                      :class="cc.selectedCommand === c.name ? 'bg-zinc-800' : ''"
+                      class="w-full text-left p-3 border-b border-zinc-900 hover:bg-zinc-800/60">
+                <div class="font-medium text-sm" x-text="'/' + c.name"></div>
+                <div class="text-xs text-zinc-500 truncate" x-text="c.description || '(no description)'"></div>
+              </button>
+            </template>
+          </div>
+          <div class="flex-1 p-6 flex flex-col min-h-0 overflow-y-auto">
+            <div x-show="cc.newCommandForm.open">
+              <h3 class="font-medium mb-3">New Slash Command</h3>
+              <input x-model="cc.newCommandForm.name" placeholder="name (will be /name)"
+                     class="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-sm mb-3 outline-none">
+              <textarea x-model="cc.newCommandForm.content" rows="14"
+                        class="w-full bg-zinc-950 border border-zinc-800 rounded p-3 font-mono text-sm outline-none"
+                        placeholder="(leave empty for a starter template)"></textarea>
+              <div class="mt-3 flex gap-2 justify-end">
+                <button @click="cc.newCommandForm = { open: false, name: '', content: '' }"
+                        class="px-3 py-1.5 bg-zinc-700 rounded text-sm">Cancel</button>
+                <button @click="ccCreateCommand()"
+                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-sm">Create</button>
+              </div>
+            </div>
+            <div x-show="!cc.newCommandForm.open && !cc.selectedCommand" class="text-zinc-500 text-sm">
+              Select a command on the left or click <strong>+ New</strong>.
+            </div>
+            <div x-show="!cc.newCommandForm.open && cc.selectedCommand" class="flex-1 flex flex-col min-h-0">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="font-medium" x-text="'Command: /' + cc.selectedCommand"></h3>
+                <button @click="ccDeleteCommand(cc.selectedCommand)"
+                        class="text-xs px-2 py-1 bg-red-600/20 text-red-400 hover:bg-red-600/40 rounded">Delete</button>
+              </div>
+              <textarea x-model="cc.commandDraft"
+                        class="flex-1 min-h-[300px] bg-zinc-950 border border-zinc-800 rounded p-3 font-mono text-sm outline-none resize-none"
+                        spellcheck="false"></textarea>
+              <div class="mt-3 flex gap-2 justify-end">
+                <button @click="cc.commandDraft = cc.commandSaved"
+                        :disabled="cc.commandDraft === cc.commandSaved"
+                        class="px-3 py-1.5 bg-zinc-700 disabled:opacity-30 rounded text-sm">Discard</button>
+                <button @click="ccSaveCommand()"
+                        :disabled="cc.commandDraft === cc.commandSaved"
+                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 rounded text-sm">Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ─────── TUNABLES ─────── -->
       <section x-show="activeTab === 'tunables' && selected" class="p-8 max-w-3xl mx-auto">
         <div class="mb-6">

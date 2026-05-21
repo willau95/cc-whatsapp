@@ -19,6 +19,7 @@ function app() {
       { id: 'overview',   icon: 'chart',      label: 'Overview',    needsProject: true },
       { id: 'chats',      icon: 'chat',       label: 'Chats',       needsProject: true },
       { id: 'persona',    icon: 'mask',       label: 'Persona',     needsProject: true },
+      { id: 'claude-native', icon: 'terminal', label: 'Claude Code', needsProject: true },
       { id: 'tunables',   icon: 'sliders',    label: 'Tunables',    needsProject: true },
       { id: 'production', icon: 'microscope', label: 'Production',  needsProject: true },
       { id: 'access',     icon: 'lock',       label: 'Access',      needsProject: true },
@@ -51,6 +52,28 @@ function app() {
     pendingTab: null,
     confirmTab: false,
     showApplyTemplate: false,
+
+    // ─── Claude Code native extension points (CLAUDE.md / skills / agents / commands) ───
+    cc: {
+      subTab: 'claude-md',
+      claudeMdSaved: '',
+      claudeMdDraft: '',
+      skillsList: [],
+      selectedSkill: '',
+      skillSaved: null,
+      skillMdDraft: '',
+      newSkillForm: { open: false, name: '', content: '' },
+      agentsList: [],
+      selectedAgent: '',
+      agentSaved: '',
+      agentDraft: '',
+      newAgentForm: { open: false, name: '', content: '' },
+      commandsList: [],
+      selectedCommand: '',
+      commandSaved: '',
+      commandDraft: '',
+      newCommandForm: { open: false, name: '', content: '' },
+    },
 
     // ─── overview ───
     liveState: {},
@@ -575,6 +598,18 @@ function app() {
       if (id === 'tunables') return this.tunablesIsDirty
       if (id === 'access')   return this.accessIsDirty
       if (id === 'mcp-tools')return this.extraMcpsIsDirty || this.tunablesIsDirty
+      if (id === 'claude-native') return this.isCcDirty()
+      return false
+    },
+    isCcDirty() {
+      const c = this.cc
+      if (c.claudeMdDraft !== c.claudeMdSaved) return true
+      if (c.selectedAgent && c.agentDraft !== c.agentSaved) return true
+      if (c.selectedCommand && c.commandDraft !== c.commandSaved) return true
+      if (c.selectedSkill && c.skillSaved) {
+        const saved = (c.skillSaved.files || []).find(f => f.path === 'SKILL.md')
+        if ((saved?.content || '') !== c.skillMdDraft) return true
+      }
       return false
     },
 
@@ -592,6 +627,7 @@ function app() {
       }
       this.activeTab = id
       if (id === 'production') this.loadTurns()
+      if (id === 'claude-native') this.ccLoadSubTab(this.cc.subTab)
     },
     async saveAndSwitch() {
       await this.saveAll()
@@ -646,6 +682,177 @@ function app() {
       this.showApplyTemplate = false
       await this.loadPersona()
       this.flashToast('Persona template applied')
+    },
+
+    // ─── Claude Code native: CLAUDE.md / Skills / Subagents / Commands ───
+    ccPath(sub) { return `/api/projects/${this.selectedId}/cc/${sub}` },
+    async ccLoadSubTab(name) {
+      this.cc.subTab = name
+      if (!this.selectedId) return
+      if (name === 'claude-md') return this.ccLoadClaudeMd()
+      if (name === 'skills')    return this.ccLoadSkillsList()
+      if (name === 'subagents') return this.ccLoadAgentsList()
+      if (name === 'commands')  return this.ccLoadCommandsList()
+    },
+    async ccLoadClaudeMd() {
+      try {
+        const r = await fetch(this.ccPath('claude-md'))
+        const data = await r.json()
+        this.cc.claudeMdSaved = data.content || ''
+        this.cc.claudeMdDraft = this.cc.claudeMdSaved
+      } catch (e) { this.flashToast('Load CLAUDE.md failed', 'error') }
+    },
+    async ccSaveClaudeMd() {
+      const r = await fetch(this.ccPath('claude-md'), {
+        method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: this.cc.claudeMdDraft,
+      })
+      if ((await r.json()).ok) {
+        this.cc.claudeMdSaved = this.cc.claudeMdDraft
+        this.flashToast('CLAUDE.md saved')
+      } else { this.flashToast('Save failed', 'error') }
+    },
+    // Skills
+    async ccLoadSkillsList() {
+      const r = await fetch(this.ccPath('skills'))
+      this.cc.skillsList = await r.json()
+      if (this.cc.selectedSkill && !this.cc.skillsList.find(s => s.name === this.cc.selectedSkill)) {
+        this.cc.selectedSkill = ''; this.cc.skillSaved = null; this.cc.skillMdDraft = ''
+      }
+    },
+    async ccSelectSkill(name) {
+      this.cc.selectedSkill = name
+      const r = await fetch(this.ccPath(`skills/${name}`))
+      const data = await r.json()
+      this.cc.skillSaved = data
+      const md = (data.files || []).find(f => f.path === 'SKILL.md')
+      this.cc.skillMdDraft = md ? md.content : ''
+    },
+    async ccSaveSkill() {
+      if (!this.cc.selectedSkill) return
+      const baseFiles = this.cc.skillSaved?.files || []
+      const files = baseFiles.map(f => f.path === 'SKILL.md' ? { path: 'SKILL.md', content: this.cc.skillMdDraft } : f)
+      if (!files.some(f => f.path === 'SKILL.md')) files.push({ path: 'SKILL.md', content: this.cc.skillMdDraft })
+      const r = await fetch(this.ccPath(`skills/${this.cc.selectedSkill}`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files }),
+      })
+      const d = await r.json()
+      if (d.ok) {
+        this.cc.skillSaved = { ...this.cc.skillSaved, files }
+        this.flashToast('Skill saved'); await this.ccLoadSkillsList()
+      } else { this.flashToast(d.err || 'Save failed', 'error') }
+    },
+    async ccCreateSkill() {
+      const f = this.cc.newSkillForm
+      if (!f.name) return this.flashToast('Name required', 'error')
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(f.name)) return this.flashToast('Invalid name (a-z 0-9 _ -)', 'error')
+      const content = f.content || `---\ndescription: TODO — when claude should load this skill (1-2 sentences, used for retrieval)\n---\n\n# ${f.name}\n\nWhat this skill is and how to use it.\n`
+      const r = await fetch(this.ccPath(`skills/${f.name}`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: [{ path: 'SKILL.md', content }] }),
+      })
+      const d = await r.json()
+      if (d.ok) {
+        this.cc.newSkillForm = { open: false, name: '', content: '' }
+        await this.ccLoadSkillsList(); await this.ccSelectSkill(f.name)
+        this.flashToast(`Created skill ${f.name}`)
+      } else { this.flashToast(d.err || 'Create failed', 'error') }
+    },
+    async ccDeleteSkill(name) {
+      if (!confirm(`Delete skill "${name}"? Removes the entire skill directory.`)) return
+      await fetch(this.ccPath(`skills/${name}`), { method: 'DELETE' })
+      if (this.cc.selectedSkill === name) { this.cc.selectedSkill = ''; this.cc.skillSaved = null; this.cc.skillMdDraft = '' }
+      await this.ccLoadSkillsList(); this.flashToast(`Deleted skill ${name}`)
+    },
+    // Subagents
+    async ccLoadAgentsList() {
+      const r = await fetch(this.ccPath('agents'))
+      this.cc.agentsList = await r.json()
+      if (this.cc.selectedAgent && !this.cc.agentsList.find(a => a.name === this.cc.selectedAgent)) {
+        this.cc.selectedAgent = ''; this.cc.agentSaved = ''; this.cc.agentDraft = ''
+      }
+    },
+    async ccSelectAgent(name) {
+      this.cc.selectedAgent = name
+      const r = await fetch(this.ccPath(`agents/${name}`))
+      const data = await r.json()
+      this.cc.agentSaved = data.content || ''
+      this.cc.agentDraft = this.cc.agentSaved
+    },
+    async ccSaveAgent() {
+      if (!this.cc.selectedAgent) return
+      const r = await fetch(this.ccPath(`agents/${this.cc.selectedAgent}`), {
+        method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: this.cc.agentDraft,
+      })
+      if ((await r.json()).ok) {
+        this.cc.agentSaved = this.cc.agentDraft
+        this.flashToast('Subagent saved'); await this.ccLoadAgentsList()
+      } else { this.flashToast('Save failed', 'error') }
+    },
+    async ccCreateAgent() {
+      const f = this.cc.newAgentForm
+      if (!f.name) return this.flashToast('Name required', 'error')
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(f.name)) return this.flashToast('Invalid name', 'error')
+      const content = f.content || `---\nname: ${f.name}\ndescription: TODO — when claude should delegate to this subagent\n---\n\nYou are ${f.name}. Your job is to ...\n`
+      const r = await fetch(this.ccPath(`agents/${f.name}`), {
+        method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: content,
+      })
+      if ((await r.json()).ok) {
+        this.cc.newAgentForm = { open: false, name: '', content: '' }
+        await this.ccLoadAgentsList(); await this.ccSelectAgent(f.name)
+        this.flashToast(`Created subagent ${f.name}`)
+      } else { this.flashToast('Create failed', 'error') }
+    },
+    async ccDeleteAgent(name) {
+      if (!confirm(`Delete subagent "${name}"?`)) return
+      await fetch(this.ccPath(`agents/${name}`), { method: 'DELETE' })
+      if (this.cc.selectedAgent === name) { this.cc.selectedAgent = ''; this.cc.agentSaved = ''; this.cc.agentDraft = '' }
+      await this.ccLoadAgentsList(); this.flashToast(`Deleted ${name}`)
+    },
+    // Commands
+    async ccLoadCommandsList() {
+      const r = await fetch(this.ccPath('commands'))
+      this.cc.commandsList = await r.json()
+      if (this.cc.selectedCommand && !this.cc.commandsList.find(c => c.name === this.cc.selectedCommand)) {
+        this.cc.selectedCommand = ''; this.cc.commandSaved = ''; this.cc.commandDraft = ''
+      }
+    },
+    async ccSelectCommand(name) {
+      this.cc.selectedCommand = name
+      const r = await fetch(this.ccPath(`commands/${name}`))
+      const data = await r.json()
+      this.cc.commandSaved = data.content || ''
+      this.cc.commandDraft = this.cc.commandSaved
+    },
+    async ccSaveCommand() {
+      if (!this.cc.selectedCommand) return
+      const r = await fetch(this.ccPath(`commands/${this.cc.selectedCommand}`), {
+        method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: this.cc.commandDraft,
+      })
+      if ((await r.json()).ok) {
+        this.cc.commandSaved = this.cc.commandDraft
+        this.flashToast('Command saved'); await this.ccLoadCommandsList()
+      } else { this.flashToast('Save failed', 'error') }
+    },
+    async ccCreateCommand() {
+      const f = this.cc.newCommandForm
+      if (!f.name) return this.flashToast('Name required', 'error')
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(f.name)) return this.flashToast('Invalid name', 'error')
+      const content = f.content || `---\ndescription: TODO — what this slash-command does\n---\n\nWhen user types /${f.name}, ...\n`
+      const r = await fetch(this.ccPath(`commands/${f.name}`), {
+        method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: content,
+      })
+      if ((await r.json()).ok) {
+        this.cc.newCommandForm = { open: false, name: '', content: '' }
+        await this.ccLoadCommandsList(); await this.ccSelectCommand(f.name)
+        this.flashToast(`Created /${f.name}`)
+      } else { this.flashToast('Create failed', 'error') }
+    },
+    async ccDeleteCommand(name) {
+      if (!confirm(`Delete command /${name}?`)) return
+      await fetch(this.ccPath(`commands/${name}`), { method: 'DELETE' })
+      if (this.cc.selectedCommand === name) { this.cc.selectedCommand = ''; this.cc.commandSaved = ''; this.cc.commandDraft = '' }
+      await this.ccLoadCommandsList(); this.flashToast(`Deleted /${name}`)
     },
 
     // ─── tunables ───

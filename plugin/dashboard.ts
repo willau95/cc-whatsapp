@@ -24,7 +24,7 @@ import {
   rmSync,
 } from 'fs'
 import { homedir, tmpdir } from 'os'
-import { dirname, join } from 'path'
+import { dirname, join, resolve as resolvePath, basename, relative as relativePath } from 'path'
 import { fileURLToPath } from 'url'
 import { spawn, type ChildProcess } from 'child_process'
 import QRCode from 'qrcode'
@@ -204,6 +204,72 @@ function writeJsonAtomic(path: string, data: any): void {
   const tmp = path + '.tmp'
   writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
   renameSync(tmp, path)
+}
+
+// Resolve a project's cwd (the actual filesystem directory claude spawns in,
+// containing CLAUDE.md and .claude/). Read from config.project_path written
+// at create/link time. Returns null if missing or invalid.
+function resolveProjectCwd(id: string): string | null {
+  const cfg = readJsonSafe(join(getStateDir(id), 'config.json'))
+  const cwd = cfg?.project_path
+  if (typeof cwd !== 'string' || !cwd) return null
+  try { return existsSync(cwd) ? cwd : null } catch { return null }
+}
+
+// Validate that a sub-path stays inside the project cwd. Rejects '..',
+// absolute paths, and anything that resolves outside `base`. Returns the
+// resolved absolute path on success, throws on attempt to escape.
+function safeJoinUnderCwd(base: string, sub: string): string {
+  if (sub.includes('\0')) throw new Error('null byte in path')
+  const joined = resolvePath(base, sub)
+  const baseR = resolvePath(base) + '/'
+  if (joined !== resolvePath(base) && !joined.startsWith(baseR)) {
+    throw new Error('path escapes project cwd')
+  }
+  return joined
+}
+
+// Slug check for a single filename or directory name (no slashes, no dots
+// leading, no shell-bad chars). Used for skill/agent/command names.
+const SAFE_SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/
+function isSafeSlug(s: string): boolean { return SAFE_SLUG_RE.test(s) }
+
+// Parse a single YAML frontmatter field from a markdown file. Returns
+// null if no frontmatter or field not present. Tolerates quotes, no value
+// folding, no nested structures — claude code's agents/skills frontmatter
+// is flat key:value so this is enough.
+function parseFrontmatterField(text: string, field: string): string | null {
+  if (!text.startsWith('---')) return null
+  const end = text.indexOf('\n---', 4)
+  if (end < 0) return null
+  const fm = text.slice(4, end)
+  const re = new RegExp(`^${field}\\s*:\\s*(.*)$`, 'm')
+  const m = fm.match(re)
+  if (!m) return null
+  let v = m[1].trim()
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1)
+  return v
+}
+
+// List markdown files in a directory, returning name + description (parsed
+// from frontmatter if present) for use in dashboard list views. Returns []
+// if dir doesn't exist (caller treats missing dir as "no items").
+function listMdItems(dir: string): Array<{ name: string; description: string }> {
+  if (!existsSync(dir)) return []
+  const out: Array<{ name: string; description: string }> = []
+  try {
+    for (const entry of readdirSync(dir)) {
+      if (!entry.endsWith('.md') || entry.startsWith('.')) continue
+      const name = entry.slice(0, -3)
+      let description = ''
+      try {
+        description = parseFrontmatterField(readFileSync(join(dir, entry), 'utf8'), 'description') ?? ''
+      } catch {}
+      out.push({ name, description })
+    }
+  } catch {}
+  out.sort((a, b) => a.name.localeCompare(b.name))
+  return out
 }
 
 function writeFileAtomic(path: string, data: string): void {
@@ -1614,6 +1680,180 @@ return POSIX path of f`
       if (sub === '/persona/apply-template' && req.method === 'POST') {
         const body = await req.json() as { template: string }
         return json(applyPersonaTemplate(id, body.template))
+      }
+
+      // ─── CLAUDE CODE NATIVE EXTENSION POINTS ─────────────────────────────
+      // CLAUDE.md, .claude/settings.json, .claude/{agents,skills,commands}/
+      // All operate on the project's actual cwd (config.project_path), not
+      // our state dir. Claude code auto-loads these on every spawn — we just
+      // give the user a UI to edit them.
+      const cc = sub.match(/^\/cc\/(.+)$/)
+      if (cc) {
+        const cwd = resolveProjectCwd(id)
+        if (!cwd) return json({ ok: false, err: 'project has no resolvable cwd' }, 400)
+        const ccSub = cc[1]
+
+        // CLAUDE.md
+        if (ccSub === 'claude-md' && req.method === 'GET') {
+          const p = join(cwd, 'CLAUDE.md')
+          try { return json({ content: existsSync(p) ? readFileSync(p, 'utf8') : '' }) }
+          catch (err) { return json({ ok: false, err: String(err) }, 500) }
+        }
+        if (ccSub === 'claude-md' && req.method === 'PUT') {
+          const body = await req.text()
+          writeFileAtomic(join(cwd, 'CLAUDE.md'), body)
+          return json({ ok: true })
+        }
+
+        // .claude/settings.json
+        if (ccSub === 'settings' && req.method === 'GET') {
+          const p = join(cwd, '.claude', 'settings.json')
+          try { return json({ content: existsSync(p) ? readFileSync(p, 'utf8') : '{}\n' }) }
+          catch (err) { return json({ ok: false, err: String(err) }, 500) }
+        }
+        if (ccSub === 'settings' && req.method === 'PUT') {
+          const body = await req.text()
+          try { JSON.parse(body) } catch (e) { return json({ ok: false, err: `invalid JSON: ${e}` }, 400) }
+          writeFileAtomic(join(cwd, '.claude', 'settings.json'), body)
+          return json({ ok: true })
+        }
+
+        // AGENTS (subagents): .claude/agents/<name>.md, single file each
+        if (ccSub === 'agents' && req.method === 'GET') {
+          return json(listMdItems(join(cwd, '.claude', 'agents')))
+        }
+        const agentOne = ccSub.match(/^agents\/([^/]+)$/)
+        if (agentOne) {
+          const name = agentOne[1]
+          if (!isSafeSlug(name)) return json({ ok: false, err: 'invalid name' }, 400)
+          const p = join(cwd, '.claude', 'agents', `${name}.md`)
+          if (req.method === 'GET') {
+            if (!existsSync(p)) return json({ ok: false, err: 'not found' }, 404)
+            return json({ name, content: readFileSync(p, 'utf8') })
+          }
+          if (req.method === 'PUT') {
+            const body = await req.text()
+            writeFileAtomic(p, body)
+            return json({ ok: true })
+          }
+          if (req.method === 'DELETE') {
+            if (existsSync(p)) unlinkSync(p)
+            return json({ ok: true })
+          }
+        }
+
+        // COMMANDS: .claude/commands/<name>.md, single file each
+        if (ccSub === 'commands' && req.method === 'GET') {
+          return json(listMdItems(join(cwd, '.claude', 'commands')))
+        }
+        const cmdOne = ccSub.match(/^commands\/([^/]+)$/)
+        if (cmdOne) {
+          const name = cmdOne[1]
+          if (!isSafeSlug(name)) return json({ ok: false, err: 'invalid name' }, 400)
+          const p = join(cwd, '.claude', 'commands', `${name}.md`)
+          if (req.method === 'GET') {
+            if (!existsSync(p)) return json({ ok: false, err: 'not found' }, 404)
+            return json({ name, content: readFileSync(p, 'utf8') })
+          }
+          if (req.method === 'PUT') {
+            const body = await req.text()
+            writeFileAtomic(p, body)
+            return json({ ok: true })
+          }
+          if (req.method === 'DELETE') {
+            if (existsSync(p)) unlinkSync(p)
+            return json({ ok: true })
+          }
+        }
+
+        // SKILLS: .claude/skills/<name>/ — each skill is a directory with
+        // SKILL.md + optional helper files. Returned/written as a file list.
+        if (ccSub === 'skills' && req.method === 'GET') {
+          const root = join(cwd, '.claude', 'skills')
+          if (!existsSync(root)) return json([])
+          const out: Array<{ name: string; description: string; fileCount: number }> = []
+          for (const entry of readdirSync(root)) {
+            if (entry.startsWith('.')) continue
+            const sd = join(root, entry)
+            try {
+              if (!statSync(sd).isDirectory()) continue
+            } catch { continue }
+            const skillMd = join(sd, 'SKILL.md')
+            let description = ''
+            if (existsSync(skillMd)) {
+              description = parseFrontmatterField(readFileSync(skillMd, 'utf8'), 'description') ?? ''
+            }
+            let fileCount = 0
+            try { for (const f of readdirSync(sd)) if (!f.startsWith('.')) fileCount++ } catch {}
+            out.push({ name: entry, description, fileCount })
+          }
+          out.sort((a, b) => a.name.localeCompare(b.name))
+          return json(out)
+        }
+        const skillOne = ccSub.match(/^skills\/([^/]+)$/)
+        if (skillOne) {
+          const name = skillOne[1]
+          if (!isSafeSlug(name)) return json({ ok: false, err: 'invalid name' }, 400)
+          const sdir = join(cwd, '.claude', 'skills', name)
+          if (req.method === 'GET') {
+            if (!existsSync(sdir)) return json({ ok: false, err: 'not found' }, 404)
+            const files: Array<{ path: string; content: string }> = []
+            const walk = (dir: string, prefix: string) => {
+              for (const e of readdirSync(dir)) {
+                if (e.startsWith('.')) continue
+                const full = join(dir, e)
+                const rel = prefix ? `${prefix}/${e}` : e
+                try {
+                  if (statSync(full).isDirectory()) walk(full, rel)
+                  else files.push({ path: rel, content: readFileSync(full, 'utf8') })
+                } catch {}
+              }
+            }
+            walk(sdir, '')
+            files.sort((a, b) => (a.path === 'SKILL.md' ? -1 : b.path === 'SKILL.md' ? 1 : a.path.localeCompare(b.path)))
+            return json({ name, files })
+          }
+          if (req.method === 'PUT') {
+            const body = await req.json() as { files: Array<{ path: string; content: string }> }
+            if (!Array.isArray(body?.files)) return json({ ok: false, err: 'files must be array' }, 400)
+            if (!body.files.some(f => f.path === 'SKILL.md')) return json({ ok: false, err: 'skill must include SKILL.md' }, 400)
+            // path traversal guard per file
+            for (const f of body.files) {
+              if (typeof f.path !== 'string' || typeof f.content !== 'string') return json({ ok: false, err: 'invalid file entry' }, 400)
+              try { safeJoinUnderCwd(sdir, f.path) } catch (e) { return json({ ok: false, err: `bad path ${f.path}: ${e}` }, 400) }
+            }
+            mkdirSync(sdir, { recursive: true })
+            // Wipe stale files: anything currently in sdir that's not in payload gets removed.
+            const incoming = new Set(body.files.map(f => f.path))
+            const wipe = (dir: string, prefix: string) => {
+              if (!existsSync(dir)) return
+              for (const e of readdirSync(dir)) {
+                if (e.startsWith('.')) continue
+                const full = join(dir, e)
+                const rel = prefix ? `${prefix}/${e}` : e
+                try {
+                  if (statSync(full).isDirectory()) {
+                    wipe(full, rel)
+                    try { if (readdirSync(full).length === 0) rmSync(full, { recursive: true, force: true }) } catch {}
+                  } else if (!incoming.has(rel)) {
+                    unlinkSync(full)
+                  }
+                } catch {}
+              }
+            }
+            wipe(sdir, '')
+            for (const f of body.files) {
+              writeFileAtomic(join(sdir, f.path), f.content)
+            }
+            return json({ ok: true })
+          }
+          if (req.method === 'DELETE') {
+            if (existsSync(sdir)) rmSync(sdir, { recursive: true, force: true })
+            return json({ ok: true })
+          }
+        }
+
+        return json({ ok: false, err: `unknown cc/* sub-route: ${ccSub}` }, 404)
       }
 
       // TUNABLES
