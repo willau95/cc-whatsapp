@@ -158,6 +158,43 @@
                   </div>
                 </template>
 
+                <!-- Recent unbound JIDs (auto-detected from hub project trace) -->
+                <template x-if="acct.recentUnboundJids && acct.recentUnboundJids.length > 0">
+                  <div class="mt-4 pt-3 border-t border-zinc-800">
+                    <div class="text-xs uppercase tracking-wider text-amber-300 mb-2 flex items-center gap-2">
+                      <span x-html="icons.alert"></span>
+                      Recent JIDs seen but not bound · click to route to a project
+                    </div>
+                    <template x-for="rj in acct.recentUnboundJids" :key="rj.jid">
+                      <div class="flex items-center gap-2 py-2 border-b border-zinc-800/50 last:border-0">
+                        <span x-html="rj.isGroup ? icons.users : icons.user" class="text-zinc-400 shrink-0"></span>
+                        <div class="flex-1 min-w-0">
+                          <div class="flex items-baseline gap-2">
+                            <code class="text-xs font-mono truncate" x-text="rj.jid"></code>
+                            <span class="text-[10px] text-zinc-500 shrink-0" x-text="rj.isGroup ? '(group)' : '(DM)'"></span>
+                          </div>
+                          <div class="text-[10px] text-zinc-500 truncate" x-text="'last text: ' + (rj.sampleText || '(no text)')"></div>
+                        </div>
+                        <select :id="'bind-sel-' + rj.jid.replace(/[^a-z0-9]/gi,'')"
+                                class="text-xs bg-zinc-950 border border-zinc-700 rounded px-2 py-1 max-w-[180px]">
+                          <option value="">— pick project —</option>
+                          <template x-for="p in acct.projects" :key="p.id">
+                            <option :value="p.id" x-text="p.name + (p.id === acct.hubProjectId ? ' (hub)' : '')"></option>
+                          </template>
+                        </select>
+                        <button @click="
+                          const sel = document.getElementById('bind-sel-' + rj.jid.replace(/[^a-z0-9]/gi,''));
+                          if (sel.value) bindDetectedJid(acct.hubProjectId, rj.jid, sel.value)
+                          else flashToast('Pick a project first', 'error')
+                        " class="text-xs px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white flex items-center gap-1">
+                          <span x-html="icons.link"></span>
+                          bind
+                        </button>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
                 <div class="mt-3 pt-3 border-t border-zinc-800">
                   <button x-show="acct.hubProjectId"
                           @click="select(acct.hubProjectId); activeTab = 'settings'"
@@ -1004,19 +1041,44 @@
     <div class="p-6 space-y-4 flex-1 overflow-y-auto">
       <div x-show="linkExisting.step === 1" class="space-y-4">
         <div class="bg-blue-900/20 border border-blue-700/30 rounded-lg p-3 text-xs text-zinc-300 leading-relaxed">
-          <strong>What this does:</strong> drops <code>.claude/cc-whatsapp/</code> into your existing project + scans QR. <strong>Touches NOTHING ELSE</strong> — your CLAUDE.md / .claude/agents/ / code untouched. Persona is whatever your project already defines.
+          <strong>What this does:</strong> stores cc-whatsapp state in <code>~/.cc-whatsapp/projects/&lt;id&gt;/</code>. <strong>Touches NOTHING in your project folder</strong> — your CLAUDE.md / .claude/agents/ / code stay exactly as they are. Persona is whatever your project already defines.
         </div>
         <div>
-          <label class="text-sm font-medium block mb-1">Project directory (absolute path)</label>
-          <input x-model="linkExisting.projectDir" type="text" placeholder="/Users/you/Desktop/some-project"
-                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
-          <p class="text-xs text-zinc-500 mt-1">Must already exist.</p>
+          <label class="text-sm font-medium block mb-1">Project directory</label>
+          <div class="flex gap-2">
+            <input x-model="linkExisting.projectDir" type="text" placeholder="/Users/you/Desktop/some-project"
+                   class="flex-1 px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+            <button type="button" @click="pickFolderForLink()"
+                    :disabled="linkExisting.picking"
+                    class="px-3 py-2 rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-sm flex items-center gap-1.5 shrink-0">
+              <span x-show="!linkExisting.picking" x-html="icons.folder"></span>
+              <span x-show="linkExisting.picking" x-html="icons.spinner"></span>
+              <span x-text="linkExisting.picking ? 'opening…' : 'Browse…'"></span>
+            </button>
+          </div>
+          <p class="text-xs text-zinc-500 mt-1">Must already exist. Either type the path or browse.</p>
         </div>
         <div>
-          <label class="text-sm font-medium block mb-1">wacli account name</label>
-          <input x-model="linkExisting.account" type="text" placeholder="my-account"
-                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
-          <p class="text-xs text-zinc-500 mt-1">Internal name for the WhatsApp number you'll scan. a-z 0-9 _ -, max 40 chars.</p>
+          <label class="text-sm font-medium block mb-1">wacli account</label>
+          <div class="flex gap-2">
+            <select x-model="linkExisting.accountChoice"
+                    @change="linkExisting.account = (linkExisting.accountChoice === '__new__') ? '' : linkExisting.accountChoice"
+                    class="flex-1 px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+              <option value="">— pick existing or create new —</option>
+              <template x-for="a in wacliAccounts" :key="a.name">
+                <option :value="a.name" x-text="a.name + (a.phone ? ' · ' + a.phone : '') + (a.paired ? '' : ' (unpaired)')"></option>
+              </template>
+              <option value="__new__">+ New account (will pair via QR)</option>
+            </select>
+          </div>
+          <input x-show="linkExisting.accountChoice === '__new__'"
+                 x-model="linkExisting.account" type="text" placeholder="my-new-account (a-z 0-9 _ - only)"
+                 class="w-full mt-2 px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+          <p class="text-xs text-zinc-500 mt-1">
+            <span x-show="linkExisting.accountChoice && linkExisting.accountChoice !== '__new__'">Reusing an existing wacli account — no QR needed.</span>
+            <span x-show="linkExisting.accountChoice === '__new__'">Creating new — you'll pair via QR after this.</span>
+            <span x-show="!linkExisting.accountChoice">Pick which WhatsApp number identity this project uses.</span>
+          </p>
         </div>
         <div>
           <label class="text-sm font-medium block mb-1">Owner JID <span class="text-zinc-500">(optional)</span></label>

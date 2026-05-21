@@ -1275,6 +1275,51 @@ const server = (globalThis as any).Bun.serve({
       })
     }
 
+    // Native macOS folder picker (osascript). Returns selected path or null.
+    if (p === '/api/pick-folder' && req.method === 'POST') {
+      const body = await req.json().catch(() => ({})) as { defaultPath?: string }
+      const defaultPath = body.defaultPath || homedir()
+      const script = `tell application "System Events"
+  activate
+  set f to choose folder with prompt "Pick a project directory" default location POSIX file "${defaultPath.replace(/"/g, '\\"')}"
+end tell
+return POSIX path of f`
+      try {
+        const r = Bun.spawnSync({ cmd: ['osascript', '-e', script], stdout: 'pipe', stderr: 'pipe' })
+        const stdout = new TextDecoder().decode(r.stdout).trim()
+        const stderr = new TextDecoder().decode(r.stderr).trim()
+        if (r.exitCode !== 0) {
+          // User cancel: osascript returns non-zero + 'User canceled' in stderr
+          if (stderr.includes('canceled') || stderr.includes('cancelled')) {
+            return json({ ok: false, cancelled: true })
+          }
+          return json({ ok: false, err: stderr || 'osascript failed' })
+        }
+        // Strip trailing slash POSIX path puts there
+        const folder = stdout.replace(/\/$/, '')
+        return json({ ok: true, folder })
+      } catch (err) {
+        return json({ ok: false, err: String(err) })
+      }
+    }
+
+    // List existing wacli accounts (for dropdown in link/create forms)
+    if (p === '/api/wacli-accounts' && req.method === 'GET') {
+      try {
+        const r = Bun.spawnSync({ cmd: [CC_WHATSAPP_BIN, 'accounts', 'list', '--json'], stdout: 'pipe', stderr: 'pipe' })
+        const parsed = JSON.parse(new TextDecoder().decode(r.stdout))
+        const accounts = parsed?.data?.accounts ?? []
+        return json(accounts.map((a: any) => ({
+          name: a.name,
+          phone: a.linked_jid || a.phone || null,
+          isDefault: !!a.default,
+          paired: isAccountPaired(a.name),
+        })))
+      } catch {
+        return json([])
+      }
+    }
+
     const projectMatch = p.match(/^\/api\/projects\/([^/]+)(\/.*)?$/)
     if (projectMatch) {
       const id = projectMatch[1]

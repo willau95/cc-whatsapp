@@ -197,12 +197,15 @@ function app() {
     // ─── link-existing-project modal ───
     linkExisting: {
       open: false, step: 1, busy: false, error: null,
-      projectDir: '', account: '', ownerJid: '',
+      projectDir: '', account: '', accountChoice: '',
+      picking: false,
+      ownerJid: '',
       newProjectId: null,
       warnings: [],
       pairStatus: 'idle', pairError: '', qrDataUrl: '',
       eventSource: null,
     },
+    wacliAccounts: [],
 
     // ─── wizard ───
     wizard: {
@@ -249,8 +252,32 @@ function app() {
     async loadAccounts() {
       try {
         const r = await fetch('/api/accounts')
-        this.accounts = await r.json()
+        const accounts = await r.json()
+        // Enrich each account with recent unbound JIDs from its hub project
+        for (const acct of accounts) {
+          if (acct.hubProjectId) {
+            try {
+              const rj = await fetch(`/api/projects/${acct.hubProjectId}/recent-jids`)
+              acct.recentUnboundJids = await rj.json()
+            } catch { acct.recentUnboundJids = [] }
+          } else {
+            acct.recentUnboundJids = []
+          }
+        }
+        this.accounts = accounts
       } catch {}
+    },
+
+    // ─── one-click bind a detected JID to a project ───
+    async bindDetectedJid(hubProjectId, jid, targetProjectId) {
+      const r = await fetch(`/api/projects/${hubProjectId}/dispatcher/bindings`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jid, targetProjectId }),
+      })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Bind failed: ' + (d.err ?? 'unknown'), 'error'); return }
+      this.flashToast('Binding saved — next message routes there')
+      await this.loadAccounts()
     },
 
     async refresh() {
@@ -309,13 +336,40 @@ function app() {
     },
 
     // ─── link existing project ───
-    openLinkExisting() {
+    async openLinkExisting() {
+      // Load existing wacli accounts for the dropdown
+      try {
+        const r = await fetch('/api/wacli-accounts')
+        this.wacliAccounts = await r.json()
+      } catch { this.wacliAccounts = [] }
       this.linkExisting = {
         open: true, step: 1, busy: false, error: null,
-        projectDir: '', account: '', ownerJid: '',
+        projectDir: '', account: '', accountChoice: '',
+        picking: false,
+        ownerJid: '',
         newProjectId: null, warnings: [],
         pairStatus: 'idle', pairError: '', qrDataUrl: '',
         eventSource: null,
+      }
+    },
+
+    async pickFolderForLink() {
+      this.linkExisting.picking = true
+      try {
+        const r = await fetch('/api/pick-folder', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ defaultPath: this.linkExisting.projectDir || '' }),
+        })
+        const d = await r.json()
+        if (d.ok && d.folder) {
+          this.linkExisting.projectDir = d.folder
+        } else if (d.cancelled) {
+          // user closed the dialog — no toast needed
+        } else if (d.err) {
+          this.flashToast('Folder picker failed: ' + d.err, 'error')
+        }
+      } finally {
+        this.linkExisting.picking = false
       }
     },
     async closeLinkExisting() {
