@@ -254,6 +254,7 @@ function app() {
     },
 
     _knownUnboundJids: new Set(),
+    _firstAccountsLoad: true,
     async loadAccountsWithNewSenderDetection() {
       await this.loadAccounts()
       const seenNow = new Set()
@@ -270,11 +271,14 @@ function app() {
         }
       }
       this._knownUnboundJids = seenNow
-      if (newCount > 0) {
+      // First load: silently absorb existing state, don't toast.
+      // Subsequent loads: toast only when something genuinely NEW appears.
+      if (newCount > 0 && !this._firstAccountsLoad) {
         const first = newOnes[0]
-        const label = first.isGroup ? 'New group chat' : 'New DM'
-        this.flashToast(`🔔 ${label} detected — go to Accounts tab to bind`)
+        const reason = first.reason || (first.isGroup ? 'unbound group' : 'unhandled sender')
+        this.flashToast(`🔔 ${reason} — see Accounts tab`)
       }
+      this._firstAccountsLoad = false
     },
 
     // Total unbound JID count across all accounts — drives nav badge

@@ -544,38 +544,88 @@ function listAccounts(): Array<{ name: string; phone?: string; paired: boolean; 
   return out.sort((a, b) => a.name.localeCompare(b.name))
 }
 
-// Pull JIDs we've seen in trace.log recently but aren't bound yet (helps user
-// "detect-then-bind" without manually copying JIDs).
-function recentUnboundJids(projectId: string, limit = 50): Array<{ jid: string; firstSeen: string; lastSeen: string; sampleText: string; isGroup: boolean }> {
-  const trace = join(getStateDir(projectId), 'trace.log')
+// JIDs that genuinely NEED user action — surfaced in dashboard for binding/allowlist.
+// Filtering logic:
+//   - SKIP if jid is already in dispatcher.bindings (= bound, handled)
+//   - SKIP if jid is in access.allowFrom (= auto-onboarded, handled)
+//   - SKIP if jid is the bot's own number (drop_from_me events — would never bind)
+//   - INCLUDE if jid appeared in drop_not_allowlisted (closed mode rejection — user must act)
+//   - INCLUDE if jid is a GROUP that hasn't been bound AND we have multiple projects on this
+//     account (binding may improve routing)
+function recentUnboundJids(projectId: string, limit = 50): Array<{ jid: string; firstSeen: string; lastSeen: string; sampleText: string; isGroup: boolean; reason: string }> {
+  const stateDir = getStateDir(projectId)
+  const trace = join(stateDir, 'trace.log')
   if (!existsSync(trace)) return []
   let lines: string[]
   try {
     const content = readFileSync(trace, 'utf8')
     lines = content.trimEnd().split('\n').slice(-2000)
   } catch { return [] }
-  const seen = new Map<string, { firstSeen: string; lastSeen: string; sampleText: string; isGroup: boolean }>()
+
   const dispatcher = readDispatcher(projectId)
   const bound = new Set(Object.keys(dispatcher.bindings))
+  const access = readJsonSafe(join(stateDir, 'access.json')) ?? { allowFrom: [] }
+  const allowFrom = new Set<string>(access.allowFrom ?? [])
+
+  // How many distinct projects share this account? If only one (SOLO), groups
+  // don't need bindings either — everything just goes to the hub naturally.
+  const project = projectInfo(idToPath(projectId), projectId)
+  const sameAccountCount = discoverProjects().filter(p => p.account === project.account).length
+  const isMultiProjectAccount = sameAccountCount > 1
+
+  type Entry = { firstSeen: string; lastSeen: string; sampleText: string; isGroup: boolean; reason: string }
+  const candidates = new Map<string, Entry>()
+
   for (const line of lines) {
-    const m = line.match(/^(\S+)\s+webhook_received\s+(.+)$/)
-    if (!m) continue
-    try {
-      const evt = JSON.parse(m[2]!)
-      const jid = evt.chat
-      if (!jid || bound.has(jid)) continue
-      if (!seen.has(jid)) {
-        seen.set(jid, { firstSeen: m[1]!, lastSeen: m[1]!, sampleText: evt.text_preview ?? '', isGroup: jid.endsWith('@g.us') })
-      } else {
-        seen.get(jid)!.lastSeen = m[1]!
-        if (!seen.get(jid)!.sampleText && evt.text_preview) seen.get(jid)!.sampleText = evt.text_preview
+    // Drop_not_allowlisted → user MUST allowlist or bind for this JID to work
+    const dm = line.match(/^(\S+)\s+drop_not_allowlisted\s+(.+)$/)
+    if (dm) {
+      try {
+        const evt = JSON.parse(dm[2]!)
+        const jid = evt.jid
+        if (!jid || bound.has(jid)) continue
+        const isGroup = jid.endsWith('@g.us')
+        if (!candidates.has(jid)) {
+          candidates.set(jid, { firstSeen: dm[1]!, lastSeen: dm[1]!, sampleText: '', isGroup, reason: 'dropped (closed-mode allowlist)' })
+        } else {
+          candidates.get(jid)!.lastSeen = dm[1]!
+        }
+      } catch {}
+      continue
+    }
+    // For groups, also surface unbound groups in MULTI-project accounts
+    // (so user can route to a specific project if desired)
+    if (isMultiProjectAccount) {
+      const wm = line.match(/^(\S+)\s+webhook_received\s+(.+)$/)
+      if (wm) {
+        try {
+          const evt = JSON.parse(wm[2]!)
+          const jid = evt.chat
+          if (!jid || bound.has(jid)) continue
+          if (!jid.endsWith('@g.us')) continue   // DMs in multi-project still auto-route to hub
+          if (candidates.has(jid)) {
+            candidates.get(jid)!.lastSeen = wm[1]!
+            if (!candidates.get(jid)!.sampleText && evt.text_preview) candidates.get(jid)!.sampleText = evt.text_preview
+          } else {
+            candidates.set(jid, {
+              firstSeen: wm[1]!, lastSeen: wm[1]!,
+              sampleText: evt.text_preview ?? '',
+              isGroup: true,
+              reason: 'group seen — optionally bind to a specific project',
+            })
+          }
+        } catch {}
       }
-    } catch {}
+    }
   }
-  return Array.from(seen.entries())
-    .map(([jid, info]) => ({ jid, ...info }))
-    .sort((a, b) => b.lastSeen.localeCompare(a.lastSeen))
-    .slice(0, limit)
+
+  // Final filter: also remove any JID that's now in allowFrom (auto-onboarded after the drop)
+  const out: any[] = []
+  for (const [jid, info] of candidates) {
+    if (allowFrom.has(jid) && info.reason !== 'group seen — optionally bind to a specific project') continue
+    out.push({ jid, ...info })
+  }
+  return out.sort((a, b) => b.lastSeen.localeCompare(a.lastSeen)).slice(0, limit)
 }
 
 // ─── Persona templates ─────────────────────────────────────────────────────
