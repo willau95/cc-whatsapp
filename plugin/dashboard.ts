@@ -769,6 +769,49 @@ function linkExistingProject(opts: { projectDir: string; account: string; ownerJ
 
 const SAFE_NAME = /^[a-z0-9_-]{1,40}$/i
 
+// Scaffold the standard claude code harness inside a fresh bot project. Only
+// the bare skeleton — empty dirs + minimal CLAUDE.md + empty settings.json —
+// so the dashboard's CLAUDE.md / Skills / Subagents / Commands tabs have
+// something to read and edit on day one. Idempotent: never overwrites.
+function scaffoldClaudeHarness(projectPath: string, botName: string): void {
+  const writeIfMissing = (p: string, content: string): void => {
+    if (existsSync(p)) return
+    mkdirSync(dirname(p), { recursive: true })
+    writeFileSync(p, content)
+  }
+  const ensureDir = (p: string): void => {
+    mkdirSync(p, { recursive: true })
+    writeIfMissing(join(p, '.gitkeep'), '')
+  }
+
+  writeIfMissing(join(projectPath, 'CLAUDE.md'),
+`# ${botName}
+
+cc-whatsapp chatbot project.
+
+Anything in this file is appended to the system prompt on every turn — keep
+it small and recurring (project-wide facts, hard rules, identity reminders).
+
+For large knowledge bases use \`.claude/skills/<topic>/SKILL.md\` — those load
+only when the user's message looks relevant, so size doesn't eat your
+per-turn token budget.
+
+For complex multi-step tasks delegated to specialists use
+\`.claude/agents/<expert>.md\` subagents.
+
+Note: cc-whatsapp's router spawns claude with \`--strict-mcp-config\`, so any
+\`.mcp.json\` here only takes effect if you also run \`claude\` in this directory
+from a terminal — not for the WhatsApp bot itself. Manage chatbot tools from
+the dashboard's MCP tab.
+`)
+
+  writeIfMissing(join(projectPath, '.claude', 'settings.json'), '{}\n')
+
+  ensureDir(join(projectPath, '.claude', 'agents'))
+  ensureDir(join(projectPath, '.claude', 'skills'))
+  ensureDir(join(projectPath, '.claude', 'commands'))
+}
+
 function createProject(opts: { parentDir: string; name: string; account: string; template?: string }): { ok: boolean; id?: string; err?: string } {
   const { parentDir, name, account } = opts
   if (!SAFE_NAME.test(name)) return { ok: false, err: 'project name must be a-z 0-9 _ - (max 40 chars)' }
@@ -812,6 +855,12 @@ function createProject(opts: { parentDir: string; name: string; account: string;
 
   // Install playbooks for memory-v2 relationship-tag-driven routing
   installPlaybooks(agentDir)
+
+  // Scaffold the standard claude code harness in the bot's cwd. CLAUDE.md +
+  // .claude/{settings.json,agents/,skills/,commands/} so the dashboard tabs
+  // for these have something to edit on day one and claude code auto-loads
+  // whatever the user puts in them.
+  scaffoldClaudeHarness(projectPath, name)
 
   // Copy contact TEMPLATE.md
   try {
