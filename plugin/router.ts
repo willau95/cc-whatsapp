@@ -138,12 +138,41 @@ function contactExists(stateDir: string, jid: string): boolean {
 // with the same session UUID — happens when Owner JID is set so the WA chat
 // shares state with the user's terminal session).
 const ourClaudePids = new Set<number>()
-function isSessionInUseByExternal(uuid: string): boolean {
+
+// Smart defer: only defer when terminal claude is ACTIVELY writing to the
+// session jsonl (= jsonl mtime within last SESSION_BUSY_WINDOW_MS). This
+// lets terminal + WhatsApp run concurrently 99% of the time (terminal sits
+// idle most of the time) and only blocks during active terminal generation.
+const SESSION_BUSY_WINDOW_MS = 60_000   // 60s — covers a typical claude turn
+function jsonlPathFor(projectPath: string, uuid: string): string {
+  // Same hash transform as findLatestSessionUuid (claude-code's convention)
+  const claudeHash = projectPath.replace(/[\/\s]+/g, '-')
+  return join(homedir(), '.claude', 'projects', claudeHash, `${uuid}.jsonl`)
+}
+function isSessionInUseByExternal(uuid: string, projectPath?: string): boolean {
   try {
     const r = spawnSync('pgrep', ['-f', `claude.*${uuid}`], { stdio: ['ignore', 'pipe', 'ignore'] })
     if (r.status !== 0 || !r.stdout) return false
     const pids = r.stdout.toString().trim().split('\n').map(s => parseInt(s, 10)).filter(Number.isFinite)
-    return pids.some(p => !ourClaudePids.has(p))
+    const external = pids.some(p => !ourClaudePids.has(p))
+    if (!external) return false
+    // External claude exists. Only consider it "in use" if jsonl was touched
+    // in the recent past — otherwise it's idle and we can spawn safely.
+    if (projectPath) {
+      try {
+        const st = statSync(jsonlPathFor(projectPath, uuid))
+        const idleMs = Date.now() - st.mtimeMs
+        if (idleMs > SESSION_BUSY_WINDOW_MS) {
+          trace('external_claude_idle_proceed', { uuid, idleMs })
+          return false   // idle long enough — safe to proceed
+        }
+        return true   // recently active — defer
+      } catch {
+        // Can't stat the jsonl — be conservative and defer
+        return true
+      }
+    }
+    return true
   } catch { return false }
 }
 
@@ -637,13 +666,15 @@ async function triggerClaude(jid: string): Promise<void> {
   if (p.batch.length === 0) { p.state = 'IDLE'; return }
 
   // Owner-JID session sharing: if this JID's session UUID is currently held
-  // by an external claude process (user's terminal), defer to avoid interleaved
-  // JSONL appends. State stays as PRE_REPLY so new inbound joins this batch.
+  // by an external claude process (user's terminal) AND that claude is
+  // ACTIVELY generating (jsonl modified recently), defer to avoid interleaved
+  // appends. If terminal is idle, proceed in parallel.
   const ownerJid = loadProjectConfig().ownerJid
   if (ownerJid && jid === ownerJid) {
-    const sess = getOrCreateSession(jid)
-    if (isSessionInUseByExternal(sess.uuid)) {
-      trace('claude_deferred_session_in_use', { jid, uuid: sess.uuid, retry_in_s: 30 })
+    const target = resolveTargetProject(jid)
+    const sess = getOrCreateSessionFor(target.stateDir, jid)
+    if (isSessionInUseByExternal(sess.uuid, target.cwd)) {
+      trace('claude_deferred_session_in_use', { jid, uuid: sess.uuid, retry_in_s: 30, reason: 'terminal claude actively writing jsonl' })
       writeStateSnapshot()
       p.timer = setTimeout(() => triggerClaude(jid), 30_000)
       return

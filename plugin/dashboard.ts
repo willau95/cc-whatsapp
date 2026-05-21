@@ -605,9 +605,10 @@ function applyPersonaTemplate(projectId: string, templateId: string): { ok: bool
 // Used when Owner JID is set: we pre-populate sessions.json[ownerJid] with this
 // UUID so the WhatsApp chat from that JID shares state with the user's terminal.
 function findLatestSessionUuid(projectPath: string): string | null {
-  // claude code stores sessions at ~/.claude/projects/-Users-foo-bar-baz/<uuid>.jsonl
-  // where the dir name is cwd with /→- prepended with -.
-  const claudeHash = projectPath.replace(/\//g, '-')
+  // claude code stores sessions at ~/.claude/projects/<hashed-cwd>/<uuid>.jsonl
+  // The hashed cwd: every `/` AND every whitespace becomes `-`. Consecutive
+  // get collapsed. So `/Users/.../Desktop/quant trade` → `-Users-...-Desktop-quant-trade`.
+  const claudeHash = projectPath.replace(/[\/\s]+/g, '-')
   const dir = join(homedir(), '.claude', 'projects', claudeHash)
   if (!existsSync(dir)) return null
   try {
@@ -1558,8 +1559,9 @@ const server = (globalThis as any).Bun.serve({
       if (sub === '/owner-jid' && req.method === 'PUT') {
         const body = await req.json() as { ownerJid: string | null }
         const cfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
-        const projectPath = idToPath(id)
+        const projectPath = cfg.project_path ?? idToPath(id)   // use config's stored path (TCC-safe)
         const sessions = readJsonSafe(join(stateDir, 'sessions.json')) ?? {}
+        const access = readJsonSafe(join(stateDir, 'access.json')) ?? { allowFrom: [], mode: 'open' }
         if (body.ownerJid) {
           cfg.ownerJid = body.ownerJid
           // Pre-populate the JID's session UUID with the latest terminal session
@@ -1570,11 +1572,23 @@ const server = (globalThis as any).Bun.serve({
             sessions[body.ownerJid] = uuid
             writeJsonAtomic(join(stateDir, 'sessions.json'), sessions)
           }
+          // CRITICAL: in closed-mode access, the owner JID would otherwise still
+          // be dropped. Auto-add to allowFrom — the user clearly wants this
+          // person to reach the bot.
+          if (!(access.allowFrom ?? []).includes(body.ownerJid)) {
+            access.allowFrom = [...(access.allowFrom ?? []), body.ownerJid]
+            writeJsonAtomic(join(stateDir, 'access.json'), access)
+          }
         } else {
           delete cfg.ownerJid
         }
         writeJsonAtomic(join(stateDir, 'config.json'), cfg)
-        return json({ ok: true, ownerJid: cfg.ownerJid ?? null, sessionUuid: sessions[body.ownerJid || ''] ?? null })
+        return json({
+          ok: true,
+          ownerJid: cfg.ownerJid ?? null,
+          sessionUuid: sessions[body.ownerJid || ''] ?? null,
+          allowFrom: access.allowFrom,
+        })
       }
 
       // EXTRA MCPS
