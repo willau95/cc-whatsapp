@@ -942,15 +942,32 @@ const server = (globalThis as any).Bun.serve({
         trace('drop_from_me_or_revoked', { jid: evt.Chat })
         return new Response('ok')
       }
-      // open mode (default) = auto-accept anyone + create contact memory
-      // closed mode = strict allowlist
-      if (!(targetAccess.allowFrom ?? []).includes(evt.Chat)) {
-        if (targetAccess.mode === 'closed') {
-          trace('drop_not_allowlisted', { jid: evt.Chat, project: target.cwd })
-          return new Response('ok')
+
+      // If this JID was routed here by an EXPLICIT hub binding, the binding
+      // IS the authorization — don't re-check satellite's access.json. This
+      // fixes the case where a freshly-linked terminal-extension project has
+      // mode=closed + empty allowFrom and would otherwise drop bound traffic.
+      const hubBindings = loadProjectConfig().bindings ?? {}
+      const isBoundDispatch = hubBindings[evt.Chat] !== undefined
+
+      if (!isBoundDispatch) {
+        // Normal access check (DM fallback / hub-as-default cases)
+        if (!(targetAccess.allowFrom ?? []).includes(evt.Chat)) {
+          if (targetAccess.mode === 'closed') {
+            trace('drop_not_allowlisted', { jid: evt.Chat, project: target.cwd })
+            return new Response('ok')
+          }
+          autoOnboardSender(target.stateDir, evt.Chat, evt.PushName)
+          trace('auto_onboarded', { jid: evt.Chat, pushName: evt.PushName, project: target.cwd })
         }
-        autoOnboardSender(target.stateDir, evt.Chat, evt.PushName)
-        trace('auto_onboarded', { jid: evt.Chat, pushName: evt.PushName, project: target.cwd })
+      } else {
+        // Bound dispatch — ensure satellite's allowFrom contains this JID
+        // (so MCP-layer assertAllowed in legacy mode would also pass) +
+        // create contact directory if bot-mode satellite.
+        if (!(targetAccess.allowFrom ?? []).includes(evt.Chat)) {
+          autoOnboardSender(target.stateDir, evt.Chat, evt.PushName)
+          trace('bound_dispatch_onboard', { jid: evt.Chat, project: target.cwd })
+        }
       }
 
       // Hand off to the batching state machine, tagged with target project.
