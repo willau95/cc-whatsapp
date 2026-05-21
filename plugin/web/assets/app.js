@@ -246,7 +246,43 @@ function app() {
         this.activeTab = 'accounts'
       }
       setInterval(() => { if (this.selectedId) this.pollLiveState() }, 2000)
-      setInterval(() => this.loadAccounts(), 5000)
+      // Accounts + their recent unbound JIDs poll every 3s.
+      // We snapshot the JID set so new arrivals trigger a toast — user
+      // doesn't have to be on Accounts tab to know something happened.
+      setInterval(() => this.loadAccountsWithNewSenderDetection(), 3000)
+    },
+
+    _knownUnboundJids: new Set(),
+    async loadAccountsWithNewSenderDetection() {
+      await this.loadAccounts()
+      const seenNow = new Set()
+      let newCount = 0
+      const newOnes = []
+      for (const acct of this.accounts) {
+        for (const rj of (acct.recentUnboundJids ?? [])) {
+          const key = `${acct.name}::${rj.jid}`
+          seenNow.add(key)
+          if (!this._knownUnboundJids.has(key)) {
+            newCount++
+            newOnes.push(rj)
+          }
+        }
+      }
+      this._knownUnboundJids = seenNow
+      if (newCount > 0) {
+        const first = newOnes[0]
+        const label = first.isGroup ? 'New group chat' : 'New DM'
+        this.flashToast(`🔔 ${label} detected — go to Accounts tab to bind`)
+      }
+    },
+
+    // Total unbound JID count across all accounts — drives nav badge
+    get totalUnboundJids() {
+      let n = 0
+      for (const acct of this.accounts) {
+        n += (acct.recentUnboundJids ?? []).length
+      }
+      return n
     },
 
     async loadAccounts() {
