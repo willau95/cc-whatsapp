@@ -1838,8 +1838,22 @@ return POSIX path of f`
             if (existsSync(skillMd)) {
               description = parseFrontmatterField(readFileSync(skillMd, 'utf8'), 'description') ?? ''
             }
+            // Recursive count — a skill is a directory tree, not just top-level entries.
+            // Without recursion, a skill with SKILL.md + references/{15 files} reads as "2".
             let fileCount = 0
-            try { for (const f of readdirSync(sd)) if (!f.startsWith('.')) fileCount++ } catch {}
+            const countTree = (d: string): void => {
+              try {
+                for (const f of readdirSync(d)) {
+                  if (f.startsWith('.')) continue
+                  const fp = join(d, f)
+                  try {
+                    if (statSync(fp).isDirectory()) countTree(fp)
+                    else fileCount++
+                  } catch {}
+                }
+              } catch {}
+            }
+            countTree(sd)
             out.push({ name: entry, description, fileCount })
           }
           out.sort((a, b) => a.name.localeCompare(b.name))

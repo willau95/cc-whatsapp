@@ -691,16 +691,30 @@
                 <button @click="ccDeleteSkill(cc.selectedSkill)"
                         class="text-xs px-2 py-1 bg-red-600/20 text-red-400 hover:bg-red-600/40 rounded">Delete skill</button>
               </div>
+
+              <!-- File picker: every file in the skill dir is editable. SKILL.md first, then helpers. -->
+              <div class="mb-2 flex flex-wrap gap-1 max-h-32 overflow-y-auto">
+                <template x-for="f in (cc.skillSaved?.files || [])" :key="f.path">
+                  <button @click="ccSelectSkillFile(f.path)"
+                          :class="cc.skillActiveFile === f.path ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'"
+                          :title="f.path"
+                          class="px-2 py-1 text-xs font-mono rounded">
+                    <span x-text="f.path"></span>
+                    <span x-show="(cc.skillFileDrafts[f.path] ?? f.content) !== f.content" class="ml-1 text-amber-300">●</span>
+                  </button>
+                </template>
+              </div>
               <p class="text-xs text-zinc-500 mb-2">
-                Editing <code class="text-zinc-400">SKILL.md</code>.
-                <span x-show="cc.skillSaved && cc.skillSaved.files && cc.skillSaved.files.length > 1"
-                      x-text="'Also has ' + (cc.skillSaved.files.length - 1) + ' helper file(s), preserved on save.'"></span>
+                Editing <code class="text-zinc-400" x-text="cc.skillActiveFile"></code>.
+                <span x-text="(cc.skillSaved?.files?.length || 0) + ' file(s) total — click any to edit.'"></span>
               </p>
-              <textarea x-model="cc.skillMdDraft"
+
+              <textarea :value="cc.skillFileDrafts[cc.skillActiveFile] ?? ''"
+                        @input="cc.skillFileDrafts[cc.skillActiveFile] = $event.target.value"
                         class="flex-1 min-h-[300px] bg-zinc-950 border border-zinc-800 rounded p-3 font-mono text-sm outline-none resize-none"
                         spellcheck="false"></textarea>
               <div class="mt-3 flex gap-2 justify-end">
-                <button @click="ccSelectSkill(cc.selectedSkill)"
+                <button @click="ccDiscardSkillEdits()"
                         class="px-3 py-1.5 bg-zinc-700 rounded text-sm">Discard</button>
                 <button @click="ccSaveSkill()"
                         class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-sm">Save</button>

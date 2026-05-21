@@ -67,7 +67,8 @@ function app() {
       skillsList: [],
       selectedSkill: '',
       skillSaved: null,
-      skillMdDraft: '',
+      skillFileDrafts: {},       // { 'SKILL.md': '...', 'references/x.md': '...' }
+      skillActiveFile: 'SKILL.md',
       newSkillForm: { open: false, name: '', content: '' },
       agentsList: [],
       selectedAgent: '',
@@ -674,8 +675,9 @@ function app() {
       if (c.selectedAgent && c.agentDraft !== c.agentSaved) return true
       if (c.selectedCommand && c.commandDraft !== c.commandSaved) return true
       if (c.selectedSkill && c.skillSaved) {
-        const saved = (c.skillSaved.files || []).find(f => f.path === 'SKILL.md')
-        if ((saved?.content || '') !== c.skillMdDraft) return true
+        for (const f of (c.skillSaved.files || [])) {
+          if ((c.skillFileDrafts[f.path] ?? f.content) !== f.content) return true
+        }
       }
       return false
     },
@@ -828,7 +830,8 @@ function app() {
       const r = await fetch(this.ccPath('skills'))
       this.cc.skillsList = await r.json()
       if (this.cc.selectedSkill && !this.cc.skillsList.find(s => s.name === this.cc.selectedSkill)) {
-        this.cc.selectedSkill = ''; this.cc.skillSaved = null; this.cc.skillMdDraft = ''
+        this.cc.selectedSkill = ''; this.cc.skillSaved = null
+        this.cc.skillFileDrafts = {}; this.cc.skillActiveFile = 'SKILL.md'
       }
     },
     async ccSelectSkill(name) {
@@ -836,14 +839,26 @@ function app() {
       const r = await fetch(this.ccPath(`skills/${name}`))
       const data = await r.json()
       this.cc.skillSaved = data
-      const md = (data.files || []).find(f => f.path === 'SKILL.md')
-      this.cc.skillMdDraft = md ? md.content : ''
+      // populate drafts for every file (so picker can edit any of them)
+      this.cc.skillFileDrafts = {}
+      for (const f of (data.files || [])) this.cc.skillFileDrafts[f.path] = f.content
+      this.cc.skillActiveFile = 'SKILL.md'
+    },
+    ccSelectSkillFile(path) {
+      this.cc.skillActiveFile = path
     },
     async ccSaveSkill() {
       if (!this.cc.selectedSkill) return
       const baseFiles = this.cc.skillSaved?.files || []
-      const files = baseFiles.map(f => f.path === 'SKILL.md' ? { path: 'SKILL.md', content: this.cc.skillMdDraft } : f)
-      if (!files.some(f => f.path === 'SKILL.md')) files.push({ path: 'SKILL.md', content: this.cc.skillMdDraft })
+      // Build files from drafts (covers all paths, edits + unchanged)
+      const files = baseFiles.map(f => ({
+        path: f.path,
+        content: this.cc.skillFileDrafts[f.path] ?? f.content,
+      }))
+      // Make sure SKILL.md exists (backend requires it)
+      if (!files.some(f => f.path === 'SKILL.md')) {
+        files.push({ path: 'SKILL.md', content: this.cc.skillFileDrafts['SKILL.md'] ?? '' })
+      }
       const r = await fetch(this.ccPath(`skills/${this.cc.selectedSkill}`), {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ files }),
@@ -853,6 +868,12 @@ function app() {
         this.cc.skillSaved = { ...this.cc.skillSaved, files }
         this.flashToast('Skill saved'); await this.ccLoadSkillsList()
       } else { this.flashToast(d.err || 'Save failed', 'error') }
+    },
+    ccDiscardSkillEdits() {
+      // re-populate drafts from saved (revert)
+      const drafts = {}
+      for (const f of (this.cc.skillSaved?.files || [])) drafts[f.path] = f.content
+      this.cc.skillFileDrafts = drafts
     },
     async ccCreateSkill() {
       const f = this.cc.newSkillForm
