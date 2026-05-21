@@ -567,6 +567,10 @@ function recentUnboundJids(projectId: string, limit = 50): Array<{ jid: string; 
   const access = readJsonSafe(join(stateDir, 'access.json')) ?? { allowFrom: [] }
   const allowFrom = new Set<string>(access.allowFrom ?? [])
 
+  // Owner-personal chats (JIDs where the owner sent first) — never surface
+  let ownerPersonal: Set<string>
+  try { ownerPersonal = new Set(JSON.parse(readFileSync(join(stateDir, 'owner_personal_chats.json'), 'utf8'))) } catch { ownerPersonal = new Set() }
+
   // How many distinct projects share this account? If only one (SOLO), groups
   // don't need bindings either — everything just goes to the hub naturally.
   const project = projectInfo(idToPath(projectId), projectId)
@@ -583,7 +587,7 @@ function recentUnboundJids(projectId: string, limit = 50): Array<{ jid: string; 
       try {
         const evt = JSON.parse(dm[2]!)
         const jid = evt.jid
-        if (!jid || bound.has(jid)) continue
+        if (!jid || bound.has(jid) || ownerPersonal.has(jid)) continue   // skip owner's personal chats
         const isGroup = jid.endsWith('@g.us')
         if (!candidates.has(jid)) {
           candidates.set(jid, { firstSeen: dm[1]!, lastSeen: dm[1]!, sampleText: '', isGroup, reason: 'dropped (closed-mode allowlist)' })
