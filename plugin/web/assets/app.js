@@ -1229,6 +1229,39 @@ function app() {
       await this.refresh()
     },
 
+    // ─── project role detection (hub / satellite / solo) ───
+    projectRole(p) {
+      const acct = this.accounts.find(a => a.name === p.account)
+      if (!acct) return 'solo'
+      if (acct.hubProjectId === p.id) {
+        // It IS the hub. But if it's the only project, treat as solo.
+        return acct.projects.length > 1 ? 'hub' : 'solo'
+      }
+      return acct.hubProjectId ? 'satellite' : 'solo'
+    },
+    projectRoleLabel(p) {
+      const r = this.projectRole(p)
+      return r === 'hub' ? 'hub' : r === 'satellite' ? 'satellite' : ''
+    },
+    projectRoleClass(p) {
+      const r = this.projectRole(p)
+      if (r === 'hub') return 'bg-emerald-900/40 text-emerald-300'
+      if (r === 'satellite') return 'bg-blue-900/40 text-blue-300'
+      return 'hidden'
+    },
+    projectStatusColor(p) {
+      const r = this.projectRole(p)
+      if (!p.paired) return 'text-amber-400'
+      if (r === 'satellite') return this.satelliteHubAlive(p) ? 'text-emerald-400' : 'text-amber-400'
+      return p.routerAlive ? 'text-emerald-400' : 'text-zinc-500'
+    },
+    satelliteHubAlive(p) {
+      const acct = this.accounts.find(a => a.name === p.account)
+      if (!acct) return false
+      const hub = acct.projects.find(x => x.id === acct.hubProjectId)
+      return hub?.routerAlive ?? false
+    },
+
     // ─── helpers ───
     stateClass(state) {
       return {

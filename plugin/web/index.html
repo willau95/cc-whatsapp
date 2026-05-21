@@ -268,29 +268,56 @@
             <div class="text-xs text-zinc-400 mt-1">Use an existing cwd as a <strong>terminal extension</strong> — WhatsApp as remote IO for your project's claude. Persona / playbooks / contact memory not used.</div>
           </button>
 
-          <!-- Existing projects -->
+          <!-- Existing projects — role-aware card -->
           <template x-for="p in projects" :key="p.id">
             <button @click="select(p.id); activeTab = 'overview'"
                     class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 hover:border-emerald-600 hover:bg-zinc-800/50 text-left">
               <div class="flex items-start gap-3">
-                <span :class="p.routerAlive ? 'text-emerald-400' : (p.paired ? 'text-zinc-500' : 'text-amber-400')"
-                      class="text-xl shrink-0" x-html="icons.dot"></span>
+                <span :class="projectStatusColor(p)" class="text-xl shrink-0" x-html="icons.dot"></span>
                 <div class="min-w-0 flex-1">
                   <div class="flex items-baseline gap-2">
                     <span class="font-bold truncate" x-text="p.name"></span>
                     <span :class="p.mode === 'terminal-extension' ? 'bg-blue-900/40 text-blue-300' : 'bg-emerald-900/40 text-emerald-300'"
                           class="text-[10px] px-1.5 py-0.5 rounded font-mono uppercase tracking-wider"
                           x-text="p.mode === 'terminal-extension' ? 'term-ext' : 'bot'"></span>
+                    <span :class="projectRoleClass(p)" class="text-[10px] px-1.5 py-0.5 rounded font-mono uppercase tracking-wider"
+                          x-text="projectRoleLabel(p)"></span>
                   </div>
                   <div class="text-xs text-zinc-500 font-mono truncate" x-text="p.account + ' · ' + p.path"></div>
-                  <div class="mt-3 flex gap-3 text-xs text-zinc-400">
-                    <span x-text="p.allowFrom.length + ' allowed'"></span>
-                    <span x-show="p.mode !== 'terminal-extension'" x-text="p.contactCount + ' contacts'"></span>
-                  </div>
-                  <div class="mt-2 flex gap-1.5">
+
+                  <!-- HUB or SOLO: traditional stats -->
+                  <template x-if="projectRole(p) === 'hub' || projectRole(p) === 'solo'">
+                    <div class="mt-3 flex gap-3 text-xs text-zinc-400">
+                      <span x-text="p.allowFrom.length + ' allowed'"></span>
+                      <span x-show="p.mode !== 'terminal-extension'" x-text="p.contactCount + ' contacts'"></span>
+                    </div>
+                  </template>
+
+                  <!-- SATELLITE: show what it's routed by, not own router state -->
+                  <template x-if="projectRole(p) === 'satellite'">
+                    <div class="mt-3 text-xs text-blue-300 flex items-center gap-1.5">
+                      <span x-html="icons.link"></span>
+                      <span>routed by hub on <code class="text-blue-200" x-text="p.account"></code></span>
+                    </div>
+                  </template>
+
+                  <!-- Status pills (role-aware) -->
+                  <div class="mt-2 flex gap-1.5 flex-wrap">
                     <span x-show="!p.paired" class="text-xs bg-amber-900/40 text-amber-300 px-2 py-0.5 rounded">needs pair</span>
-                    <span x-show="p.paired && !p.routerAlive" class="text-xs bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded">stopped</span>
-                    <span x-show="p.routerAlive" class="text-xs bg-emerald-900/40 text-emerald-300 px-2 py-0.5 rounded">live</span>
+                    <!-- For hub / solo: show live/stopped of OWN router -->
+                    <template x-if="projectRole(p) === 'hub' || projectRole(p) === 'solo'">
+                      <span>
+                        <span x-show="p.paired && !p.routerAlive" class="text-xs bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded">stopped</span>
+                        <span x-show="p.routerAlive" class="text-xs bg-emerald-900/40 text-emerald-300 px-2 py-0.5 rounded">live</span>
+                      </span>
+                    </template>
+                    <!-- For satellite: status depends on hub being alive -->
+                    <template x-if="projectRole(p) === 'satellite'">
+                      <span>
+                        <span x-show="satelliteHubAlive(p)" class="text-xs bg-emerald-900/40 text-emerald-300 px-2 py-0.5 rounded">live via hub</span>
+                        <span x-show="!satelliteHubAlive(p)" class="text-xs bg-amber-900/40 text-amber-300 px-2 py-0.5 rounded">hub stopped</span>
+                      </span>
+                    </template>
                     <span x-show="p.disabled" class="text-xs bg-red-900/40 text-red-300 px-2 py-0.5 rounded">kill switch</span>
                   </div>
                 </div>
