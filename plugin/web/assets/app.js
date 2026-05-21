@@ -211,6 +211,7 @@ function app() {
     wizard: {
       open: false, step: 1, busy: false, error: null,
       name: '', parentDir: '', account: '', template: 'eva',
+      picking: false,
       newProjectId: null,
       pairStatus: 'idle',
       pairError: '',
@@ -1061,14 +1062,40 @@ function app() {
     },
 
     // ─── wizard ───
-    openWizard() {
+    async openWizard() {
+      // Restore last-used parent dir from localStorage. Falls back to
+      // hostInfo.defaultParent (set during init() — usually ~/Projects).
+      const remembered = localStorage.getItem('cc-whatsapp.lastParentDir')
       this.wizard = {
         ...this.wizard,
         open: true, step: 1, busy: false, error: null,
         name: '', account: '', template: 'eva',
+        picking: false,
+        parentDir: remembered || this.wizard.parentDir,
         newProjectId: null,
         pairStatus: 'idle', pairError: '', pairAlreadyDone: false,
         eventSource: null,
+      }
+    },
+
+    async pickFolderForWizard() {
+      this.wizard.picking = true
+      try {
+        const r = await fetch('/api/pick-folder', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ defaultPath: this.wizard.parentDir || '' }),
+        })
+        const d = await r.json()
+        if (d.ok && d.folder) {
+          this.wizard.parentDir = d.folder
+          localStorage.setItem('cc-whatsapp.lastParentDir', d.folder)
+        } else if (d.cancelled) {
+          // no-op
+        } else if (d.err) {
+          this.flashToast('Folder picker failed: ' + d.err, 'error')
+        }
+      } finally {
+        this.wizard.picking = false
       }
     },
     closeWizard() {
@@ -1102,6 +1129,7 @@ function app() {
           return
         }
         this.wizard.newProjectId = data.id
+        localStorage.setItem('cc-whatsapp.lastParentDir', this.wizard.parentDir)
         await this.refresh()
         this.wizard.step = 2
       } finally {

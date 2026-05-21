@@ -1255,9 +1255,18 @@
         </div>
         <div>
           <label class="text-sm font-medium block mb-1">Parent directory</label>
-          <input x-model="wizard.parentDir" type="text"
-                 class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
-          <p class="text-xs text-zinc-500 mt-1">where to create the folder · <code x-text="wizard.parentDir + '/' + wizard.name"></code></p>
+          <div class="flex gap-2">
+            <input x-model="wizard.parentDir" type="text"
+                   class="flex-1 px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+            <button type="button" @click="pickFolderForWizard()"
+                    :disabled="wizard.picking"
+                    class="px-3 py-2 rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-sm flex items-center gap-1.5 shrink-0">
+              <span x-show="!wizard.picking" x-html="icons.folder"></span>
+              <span x-show="wizard.picking" x-html="icons.spinner"></span>
+              <span x-text="wizard.picking ? 'opening…' : 'Browse…'"></span>
+            </button>
+          </div>
+          <p class="text-xs text-zinc-500 mt-1">creates: <code x-text="(wizard.parentDir || '?') + '/' + (wizard.name || '<name>')"></code></p>
         </div>
         <div>
           <label class="text-sm font-medium block mb-1">wacli account name</label>
