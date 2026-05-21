@@ -567,9 +567,14 @@ function recentUnboundJids(projectId: string, limit = 50): Array<{ jid: string; 
   const access = readJsonSafe(join(stateDir, 'access.json')) ?? { allowFrom: [] }
   const allowFrom = new Set<string>(access.allowFrom ?? [])
 
-  // Owner-personal chats (JIDs where the owner sent first) — never surface
+  // Owner-personal chats (JIDs where the owner sent first) — never surface.
+  // Stored at ACCOUNT-LEVEL: ~/.cc-whatsapp/accounts/<account>/owner_personal_chats.json
+  // so any project on the account shares the same blacklist.
+  const projectCfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
+  const acctName = projectCfg.account ?? 'main'
+  const ownerPersonalFile = join(homedir(), '.cc-whatsapp', 'accounts', acctName, 'owner_personal_chats.json')
   let ownerPersonal: Set<string>
-  try { ownerPersonal = new Set(JSON.parse(readFileSync(join(stateDir, 'owner_personal_chats.json'), 'utf8'))) } catch { ownerPersonal = new Set() }
+  try { ownerPersonal = new Set(JSON.parse(readFileSync(ownerPersonalFile, 'utf8'))) } catch { ownerPersonal = new Set() }
 
   // How many distinct projects share this account? If only one (SOLO), groups
   // don't need bindings either — everything just goes to the hub naturally.
