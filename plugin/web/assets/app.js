@@ -22,6 +22,7 @@ function app() {
       { id: 'claude-native', icon: 'terminal', label: 'Claude Code', needsProject: true },
       { id: 'tunables',   icon: 'sliders',    label: 'Tunables',    needsProject: true },
       { id: 'production', icon: 'microscope', label: 'Production',  needsProject: true },
+      { id: 'sessions',   icon: 'users',      label: 'Sessions',    needsProject: true },
       { id: 'access',     icon: 'lock',       label: 'Access',      needsProject: true },
       { id: 'mcp-tools',  icon: 'wrench',     label: 'MCP & Tools', needsProject: true },
       { id: 'playbooks',  icon: 'book',       label: 'Playbooks',   needsProject: true },
@@ -52,6 +53,11 @@ function app() {
     pendingTab: null,
     confirmTab: false,
     showApplyTemplate: false,
+
+    // ─── sessions (per-JID claude jsonl long-term memory) ───
+    sessionsList: [],
+    selectedSessionJid: '',
+    sessionDetail: null,
 
     // ─── Claude Code native extension points (CLAUDE.md / skills / agents / commands) ───
     cc: {
@@ -689,6 +695,7 @@ function app() {
       this.activeTab = id
       if (id === 'production') this.loadTurns()
       if (id === 'claude-native') this.ccLoadSubTab(this.cc.subTab)
+      if (id === 'sessions') this.loadSessions()
     },
     async saveAndSwitch() {
       await this.saveAll()
@@ -743,6 +750,50 @@ function app() {
       this.showApplyTemplate = false
       await this.loadPersona()
       this.flashToast('Persona template applied')
+    },
+
+    // ─── Sessions (per-JID claude code jsonl long-term memory) ───
+    async loadSessions() {
+      if (!this.selectedId) return
+      const r = await fetch(`/api/projects/${this.selectedId}/sessions`)
+      this.sessionsList = await r.json()
+    },
+    async viewSession(jid) {
+      this.selectedSessionJid = jid
+      const r = await fetch(`/api/projects/${this.selectedId}/sessions/${encodeURIComponent(jid)}`)
+      this.sessionDetail = await r.json()
+    },
+    closeSessionDetail() {
+      this.selectedSessionJid = ''
+      this.sessionDetail = null
+    },
+    async resetSessionJid(jid) {
+      if (!confirm(`Reset session for ${jid}?\n\nThe bot will forget this user's entire history on the next message. The old jsonl is archived (not deleted) so you can recover if needed.`)) return
+      const r = await fetch(`/api/projects/${this.selectedId}/sessions/${encodeURIComponent(jid)}/reset`, { method: 'POST' })
+      const d = await r.json()
+      if (d.ok) { this.flashToast(`Reset session for ${jid} (archived from ${d.archivedFrom?.slice(0,8) || '?'})`); this.closeSessionDetail(); await this.loadSessions() }
+      else this.flashToast(d.err || 'Reset failed', 'error')
+    },
+    async forkSessionJid(jid) {
+      if (!confirm(`Fork session for ${jid}?\n\nCopies the current jsonl to a new UUID and points the bot at the fork. The original stays intact — useful for "branching" a conversation experimentally.`)) return
+      const r = await fetch(`/api/projects/${this.selectedId}/sessions/${encodeURIComponent(jid)}/fork`, { method: 'POST' })
+      const d = await r.json()
+      if (d.ok) { this.flashToast(`Forked to ${d.newUuid.slice(0,8)} (old ${d.oldUuid.slice(0,8)} preserved)`); await this.loadSessions() }
+      else this.flashToast(d.err || 'Fork failed', 'error')
+    },
+    fmtBytes(n) {
+      if (!n) return '0'
+      if (n < 1024) return n + ' B'
+      if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB'
+      return (n/1024/1024).toFixed(2) + ' MB'
+    },
+    fmtTimeAgo(ms) {
+      if (!ms) return '—'
+      const s = (Date.now() - ms) / 1000
+      if (s < 60) return Math.floor(s) + 's ago'
+      if (s < 3600) return Math.floor(s/60) + 'm ago'
+      if (s < 86400) return Math.floor(s/3600) + 'h ago'
+      return Math.floor(s/86400) + 'd ago'
     },
 
     // ─── Claude Code native: CLAUDE.md / Skills / Subagents / Commands ───

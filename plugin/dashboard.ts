@@ -27,6 +27,7 @@ import { homedir, tmpdir } from 'os'
 import { dirname, join, resolve as resolvePath, basename, relative as relativePath } from 'path'
 import { fileURLToPath } from 'url'
 import { spawn, type ChildProcess } from 'child_process'
+import { randomUUID } from 'crypto'
 import QRCode from 'qrcode'
 
 const PLUGIN_ROOT = dirname(fileURLToPath(import.meta.url))
@@ -249,6 +250,32 @@ function parseFrontmatterField(text: string, field: string): string | null {
   let v = m[1].trim()
   if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1)
   return v
+}
+
+// Extract a short readable preview from a parsed jsonl line. Claude code's
+// jsonl shapes vary by message type — user/assistant/tool_use/tool_result.
+// We don't try to render rich content, just give the dashboard enough text
+// to scan the session at a glance.
+function extractMessagePreview(obj: any): string {
+  if (!obj || typeof obj !== 'object') return ''
+  // user/assistant messages: { message: { role, content } }
+  const msg = obj.message ?? obj
+  const role = msg?.role ?? msg?.type
+  const content = msg?.content
+  let text = ''
+  if (typeof content === 'string') text = content
+  else if (Array.isArray(content)) {
+    for (const c of content) {
+      if (typeof c === 'string') { text += c; continue }
+      if (c?.type === 'text' && typeof c.text === 'string') text += c.text
+      else if (c?.type === 'tool_use') text += `[tool: ${c.name}]`
+      else if (c?.type === 'tool_result') text += `[result]`
+      else if (c?.type === 'image') text += `[image]`
+    }
+  }
+  text = text.replace(/\s+/g, ' ').trim()
+  if (text.length > 200) text = text.slice(0, 200) + '…'
+  return text || (role ? `(${role}, no text)` : '')
 }
 
 // List markdown files in a directory, returning name + description (parsed
@@ -1882,6 +1909,102 @@ return POSIX path of f`
         }
 
         return json({ ok: false, err: `unknown cc/* sub-route: ${ccSub}` }, 404)
+      }
+
+      // ─── SESSIONS (per-JID claude code jsonl history) ───────────────────
+      // Sessions are the bot's long-term memory: --resume <uuid> replays the
+      // entire jsonl on every turn. Per-JID isolation in sessions.json maps
+      // each WhatsApp contact to its own session UUID, so different users
+      // get different memories.
+      if (sub === '/sessions' && req.method === 'GET') {
+        const cwd = resolveProjectCwd(id)
+        const sessFile = join(stateDir, 'sessions.json')
+        const sessions: Record<string, string> = readJsonSafe(sessFile) ?? {}
+        const out: Array<{ jid: string; uuid: string; exists: boolean; sizeBytes: number; mtimeMs: number; messageCount: number }> = []
+        for (const [jid, uuid] of Object.entries(sessions)) {
+          const p = cwd ? join(homedir(), '.claude', 'projects', cwd.replace(/[\/\s]+/g, '-'), `${uuid}.jsonl`) : ''
+          let exists = false, sizeBytes = 0, mtimeMs = 0, messageCount = 0
+          try {
+            const st = statSync(p)
+            exists = true; sizeBytes = st.size; mtimeMs = st.mtimeMs
+            // count messages = newline-delimited json lines (cheap, no parsing)
+            messageCount = readFileSync(p, 'utf8').split('\n').filter(l => l.trim()).length
+          } catch {}
+          out.push({ jid, uuid, exists, sizeBytes, mtimeMs, messageCount })
+        }
+        out.sort((a, b) => b.mtimeMs - a.mtimeMs)
+        return json(out)
+      }
+      const sessOne = sub.match(/^\/sessions\/([^/]+)$/)
+      if (sessOne && req.method === 'GET') {
+        const jid = decodeURIComponent(sessOne[1])
+        const cwd = resolveProjectCwd(id)
+        if (!cwd) return json({ ok: false, err: 'no project cwd' }, 400)
+        const sessions: Record<string, string> = readJsonSafe(join(stateDir, 'sessions.json')) ?? {}
+        const uuid = sessions[jid]
+        if (!uuid) return json({ ok: false, err: 'no session for this jid' }, 404)
+        const p = join(homedir(), '.claude', 'projects', cwd.replace(/[\/\s]+/g, '-'), `${uuid}.jsonl`)
+        if (!existsSync(p)) return json({ jid, uuid, path: p, messages: [] })
+        // Parse jsonl into a compact view: role, content preview, timestamp.
+        // Full lines kept verbatim for users who want raw debugging.
+        const lines = readFileSync(p, 'utf8').split('\n').filter(l => l.trim())
+        const messages = lines.map((line, idx) => {
+          try {
+            const obj = JSON.parse(line)
+            return {
+              idx,
+              type: obj.type ?? obj.role ?? 'unknown',
+              timestamp: obj.timestamp ?? obj.ts ?? null,
+              preview: extractMessagePreview(obj),
+              raw: line.length > 4000 ? line.slice(0, 4000) + '…[truncated]' : line,
+            }
+          } catch {
+            return { idx, type: 'invalid', timestamp: null, preview: line.slice(0, 120), raw: line }
+          }
+        })
+        return json({ jid, uuid, path: p, messages })
+      }
+      const sessReset = sub.match(/^\/sessions\/([^/]+)\/reset$/)
+      if (sessReset && req.method === 'POST') {
+        const jid = decodeURIComponent(sessReset[1])
+        const cwd = resolveProjectCwd(id)
+        const sessFile = join(stateDir, 'sessions.json')
+        const sessions: Record<string, string> = readJsonSafe(sessFile) ?? {}
+        const oldUuid = sessions[jid]
+        if (!oldUuid) return json({ ok: false, err: 'no session to reset' }, 404)
+        // Archive old jsonl so the user can recover if reset was a mistake.
+        if (cwd) {
+          const claudeDir = join(homedir(), '.claude', 'projects', cwd.replace(/[\/\s]+/g, '-'))
+          const oldPath = join(claudeDir, `${oldUuid}.jsonl`)
+          if (existsSync(oldPath)) {
+            const archive = join(claudeDir, `${oldUuid}.archived-${Date.now()}.jsonl`)
+            try { renameSync(oldPath, archive) } catch {}
+          }
+        }
+        // Remove from sessions.json — next inbound msg from this JID gets a fresh UUID.
+        delete sessions[jid]
+        writeJsonAtomic(sessFile, sessions)
+        return json({ ok: true, jid, archivedFrom: oldUuid })
+      }
+      const sessFork = sub.match(/^\/sessions\/([^/]+)\/fork$/)
+      if (sessFork && req.method === 'POST') {
+        const jid = decodeURIComponent(sessFork[1])
+        const cwd = resolveProjectCwd(id)
+        if (!cwd) return json({ ok: false, err: 'no project cwd' }, 400)
+        const sessFile = join(stateDir, 'sessions.json')
+        const sessions: Record<string, string> = readJsonSafe(sessFile) ?? {}
+        const oldUuid = sessions[jid]
+        if (!oldUuid) return json({ ok: false, err: 'no session to fork' }, 404)
+        const claudeDir = join(homedir(), '.claude', 'projects', cwd.replace(/[\/\s]+/g, '-'))
+        const oldPath = join(claudeDir, `${oldUuid}.jsonl`)
+        if (!existsSync(oldPath)) return json({ ok: false, err: 'old jsonl missing' }, 404)
+        const newUuid = randomUUID()
+        try { copyFileSync(oldPath, join(claudeDir, `${newUuid}.jsonl`)) } catch (e) {
+          return json({ ok: false, err: `fork copy failed: ${e}` }, 500)
+        }
+        sessions[jid] = newUuid
+        writeJsonAtomic(sessFile, sessions)
+        return json({ ok: true, jid, oldUuid, newUuid })
       }
 
       // TUNABLES
