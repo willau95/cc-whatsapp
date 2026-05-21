@@ -1097,15 +1097,20 @@ function startPair(projectId: string): { ok: boolean; err?: string } {
             sess.status = 'paired'
             broadcast('status', 'paired')
             // Auto-start router so the bot is alive without an extra user click.
-            // Kick off async; toast appears in browser via subsequent /projects refresh.
-            setTimeout(() => {
+            // startRouter is async (waits ~3s to verify the router actually came up
+            // + reads stderr for diagnostics). We must AWAIT it or the Promise
+            // never resolves and we lose visibility into whether it worked.
+            setTimeout(async () => {
               try {
-                const r = startRouter(projectId)
-                process.stderr.write(`[pair:${sess.account}] auto-start router → ${JSON.stringify(r)}\n`)
+                const r = await startRouter(projectId)
+                process.stderr.write(`[pair:${sess.account}] auto-start router → ok=${r.ok} pid=${r.pid ?? '?'} ${r.err ? 'err=' + r.err : ''}\n`)
+                if (!r.ok && r.trace_tail) {
+                  process.stderr.write(`[pair:${sess.account}] trace_tail: ${r.trace_tail.slice(-300)}\n`)
+                }
               } catch (err) {
-                process.stderr.write(`[pair:${sess.account}] auto-start router failed: ${err}\n`)
+                process.stderr.write(`[pair:${sess.account}] auto-start router threw: ${err}\n`)
               }
-            }, 1500)   // give wacli a beat to release its lock from auth process
+            }, 2500)   // give cc-whatsapp auth process a beat to release its lock
           }
         } else if (name === 'error' || name === 'pair_error' || name === 'auth_failed') {
           sess.status = 'error'
