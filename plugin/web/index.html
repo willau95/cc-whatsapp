@@ -900,6 +900,31 @@
                     <input type="text" x-model="tunablesDraft[key]" @input="markTunablesDirty()"
                            class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
                   </template>
+
+                  <template x-if="tunablesMeta[key]?.type === 'textarea'">
+                    <textarea rows="6" x-model="tunablesDraft[key]" @input="markTunablesDirty()"
+                              class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono"></textarea>
+                  </template>
+
+                  <template x-if="tunablesMeta[key]?.type === 'select'">
+                    <select x-model="tunablesDraft[key]" @change="markTunablesDirty()"
+                            class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono">
+                      <template x-for="opt in tunablesMeta[key].options" :key="opt.value">
+                        <option :value="opt.value" x-text="opt.label"></option>
+                      </template>
+                    </select>
+                  </template>
+
+                  <template x-if="tunablesMeta[key]?.type === 'array'">
+                    <div>
+                      <textarea rows="4"
+                                :value="(tunablesDraft[key] || []).join('\n')"
+                                @input="tunablesDraft[key] = $event.target.value.split('\n').map(s=>s.trim()).filter(Boolean); markTunablesDirty()"
+                                class="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded text-sm font-mono"
+                                placeholder="(one entry per line)"></textarea>
+                      <div class="text-xs text-zinc-500 mt-1" x-text="(tunablesDraft[key] || []).length + ' entries'"></div>
+                    </div>
+                  </template>
                 </div>
               </template>
             </div>

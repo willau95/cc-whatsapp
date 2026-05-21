@@ -255,18 +255,31 @@ type Tunables = {
   inter_segment_min_ms: number
   inter_segment_max_ms: number
   enable_typing_indicator: boolean
-  chat_model: string
   max_prompt_chars: number
   length_factor_short: number
   length_factor_medium: number
   length_factor_long: number
+  dry_run: boolean
+
+  // Claude Code launch flags (added Commit 3)
+  chat_model: string
+  fallback_model: string
+  effort: '' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  permission_mode: 'bypassPermissions' | 'acceptEdits' | 'auto' | 'default' | 'dontAsk' | 'plan'
   allowed_tools: string[]
   disallowed_tools: string[]
-  dry_run: boolean
+  add_dirs: string[]
+  max_budget_usd_per_turn: number
+  system_prompt_override: string
+  plugin_dirs: string[]
+  plugin_urls: string[]
+  setting_sources: string
+  exclude_dynamic_system_prompt_sections: boolean
 }
 function tunables(): Tunables {
   let stored: any = {}
   try { stored = JSON.parse(readFileSync(TUNABLES_FILE, 'utf8')) } catch {}
+  const arr = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
   return {
     collect_window_ms: stored.collect_window_ms ?? Number(process.env.CC_WHATSAPP_COLLECT_WINDOW_MS ?? 60_000),
     pre_reply_min_ms:  stored.pre_reply_min_ms  ?? Number(process.env.CC_WHATSAPP_PRE_REPLY_MIN_MS  ?? 30_000),
@@ -275,15 +288,26 @@ function tunables(): Tunables {
     multi_msg_max_segments:  stored.multi_msg_max_segments  ?? 4,
     inter_segment_min_ms:    stored.inter_segment_min_ms    ?? 800,
     inter_segment_max_ms:    stored.inter_segment_max_ms    ?? 2200,
-    enable_typing_indicator: stored.enable_typing_indicator !== false,  // default true
-    chat_model: stored.chat_model ?? (process.env.CC_WHATSAPP_CHAT_MODEL ?? 'claude-haiku-4-5-20251001'),
+    enable_typing_indicator: stored.enable_typing_indicator !== false,
     max_prompt_chars: stored.max_prompt_chars ?? 8000,
     length_factor_short:  stored.length_factor_short  ?? 0.5,
     length_factor_medium: stored.length_factor_medium ?? 1.0,
     length_factor_long:   stored.length_factor_long   ?? 1.6,
-    allowed_tools:   Array.isArray(stored.allowed_tools)   ? stored.allowed_tools   : [],
-    disallowed_tools: Array.isArray(stored.disallowed_tools) ? stored.disallowed_tools : [],
     dry_run: process.env.CC_WHATSAPP_DRY_RUN === '1',
+
+    chat_model: stored.chat_model ?? (process.env.CC_WHATSAPP_CHAT_MODEL ?? 'claude-haiku-4-5-20251001'),
+    fallback_model: typeof stored.fallback_model === 'string' ? stored.fallback_model : '',
+    effort: ['low','medium','high','xhigh','max'].includes(stored.effort) ? stored.effort : '',
+    permission_mode: ['bypassPermissions','acceptEdits','auto','default','dontAsk','plan'].includes(stored.permission_mode) ? stored.permission_mode : 'bypassPermissions',
+    allowed_tools:    arr(stored.allowed_tools),
+    disallowed_tools: arr(stored.disallowed_tools),
+    add_dirs:         arr(stored.add_dirs),
+    max_budget_usd_per_turn: typeof stored.max_budget_usd_per_turn === 'number' ? stored.max_budget_usd_per_turn : 0,
+    system_prompt_override: typeof stored.system_prompt_override === 'string' ? stored.system_prompt_override : '',
+    plugin_dirs: arr(stored.plugin_dirs),
+    plugin_urls: arr(stored.plugin_urls),
+    setting_sources: typeof stored.setting_sources === 'string' && stored.setting_sources ? stored.setting_sources : 'user,project,local',
+    exclude_dynamic_system_prompt_sections: stored.exclude_dynamic_system_prompt_sections === true,
   }
 }
 
@@ -788,21 +812,52 @@ function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startM
   const sess = getOrCreateSessionFor(target.stateDir, jid)
   const sessFlag = sess.isNew ? ['--session-id', sess.uuid] : ['--resume', sess.uuid]
   const t = tunables()
+
+  // Tool / dir allowlist flags
   const toolFlags: string[] = []
-  if (t.allowed_tools.length > 0) toolFlags.push('--allowedTools', t.allowed_tools.join(','))
+  if (t.allowed_tools.length > 0)    toolFlags.push('--allowedTools', t.allowed_tools.join(','))
   if (t.disallowed_tools.length > 0) toolFlags.push('--disallowedTools', t.disallowed_tools.join(','))
+  for (const d of t.add_dirs) toolFlags.push('--add-dir', d)
+
+  // System prompt: if override is set, REPLACE claude code's default (drop
+  // --append-system-prompt) and inject persona inside the override so the
+  // bot still has its identity. Otherwise append persona to the default.
+  const systemPromptFlags = t.system_prompt_override
+    ? ['--system-prompt', `${t.system_prompt_override}\n\n${targetPersona}`]
+    : ['--append-system-prompt', targetPersona]
+
+  // Permission mode: bypassPermissions is the default and equivalent to the
+  // old hardcoded --dangerously-skip-permissions. Users can switch to e.g.
+  // acceptEdits if they want stricter behavior (chatbot has no human to
+  // approve risky stuff so anything stricter than bypassPermissions will
+  // make some tool calls fail — surfaced as a warning in the UI).
+  const permFlag = ['--permission-mode', t.permission_mode]
+
+  // Optional flags — only added when non-default
+  const optionalFlags: string[] = []
+  if (t.effort) optionalFlags.push('--effort', t.effort)
+  if (t.fallback_model) optionalFlags.push('--fallback-model', t.fallback_model)
+  if (t.max_budget_usd_per_turn > 0) optionalFlags.push('--max-budget-usd', String(t.max_budget_usd_per_turn))
+  for (const p of t.plugin_dirs) optionalFlags.push('--plugin-dir', p)
+  for (const p of t.plugin_urls) optionalFlags.push('--plugin-url', p)
+  if (t.setting_sources && t.setting_sources !== 'user,project,local') {
+    optionalFlags.push('--setting-sources', t.setting_sources)
+  }
+  if (t.exclude_dynamic_system_prompt_sections) optionalFlags.push('--exclude-dynamic-system-prompt-sections')
+
   const args = [
     '-p',
     '--model', t.chat_model,
     '--mcp-config', buildMcpJsonFor(target.stateDir),
-    '--dangerously-skip-permissions',
     '--strict-mcp-config',
-    '--append-system-prompt', targetPersona,
+    ...permFlag,
+    ...systemPromptFlags,
     ...toolFlags,
+    ...optionalFlags,
     ...sessFlag,
     prompt,
   ]
-  trace('claude_spawn', { jid, project: target.cwd, sessId: sess.uuid, sessNew: sess.isNew, model: t.chat_model, promptLen: prompt.length, turnId, toolFlags })
+  trace('claude_spawn', { jid, project: target.cwd, sessId: sess.uuid, sessNew: sess.isNew, model: t.chat_model, promptLen: prompt.length, turnId, toolFlags, optionalFlags, permission_mode: t.permission_mode, sys_override: !!t.system_prompt_override })
 
   const heartbeat = startTyping(jid)
   // Spawn with TARGET project's cwd + per-spawn ALLOWED_JIDS for hard-isolation

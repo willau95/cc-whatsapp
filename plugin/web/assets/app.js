@@ -109,6 +109,8 @@ function app() {
       { title: 'Send pacing (per-segment delay during multi-msg replies)', keys: ['inter_segment_min_ms', 'inter_segment_max_ms', 'length_factor_short', 'length_factor_medium', 'length_factor_long'] },
       { title: 'Reply shape (what the bot chooses to do)',           keys: ['quote_reply_probability', 'multi_msg_max_segments', 'enable_typing_indicator'] },
       { title: 'Brain',                                              keys: ['chat_model', 'max_prompt_chars'] },
+      { title: 'Claude Code launch flags (advanced — every official flag mapped 1:1)',
+        keys: ['effort', 'fallback_model', 'permission_mode', 'max_budget_usd_per_turn', 'add_dirs', 'system_prompt_override', 'plugin_dirs', 'plugin_urls', 'setting_sources', 'exclude_dynamic_system_prompt_sections'] },
     ],
     tunablesMeta: {
       collect_window_ms: {
@@ -173,6 +175,65 @@ function app() {
         label: 'Max chars per inbound msg', type: 'number', unit: 'chars', step: 500, min: 500, max: 100_000, default: 8000,
         help: 'Truncate a single inbound message at this length before feeding to Claude.',
         feelLike: v => v < 2000 ? 'tight' : v < 10_000 ? 'comfortable' : 'very long allowed',
+      },
+
+      // ─── Claude Code launch flags ─────────────────────────────────────
+      effort: {
+        label: '--effort', type: 'select', default: '',
+        options: [
+          { value: '',       label: '(claude default)' },
+          { value: 'low',    label: 'low' },
+          { value: 'medium', label: 'medium' },
+          { value: 'high',   label: 'high' },
+          { value: 'xhigh',  label: 'xhigh' },
+          { value: 'max',    label: 'max' },
+        ],
+        help: 'Reasoning effort level. Higher = deeper thinking, more tokens, slower. Empty = claude code picks the default for the model.',
+      },
+      fallback_model: {
+        label: '--fallback-model', type: 'text', default: '',
+        help: 'Anthropic model ID to fall back to when the primary chat_model is overloaded. Empty = no fallback (turn fails on overload).',
+      },
+      permission_mode: {
+        label: '--permission-mode', type: 'select', default: 'bypassPermissions',
+        options: [
+          { value: 'bypassPermissions', label: 'bypassPermissions (chatbot default — no human to confirm)' },
+          { value: 'acceptEdits',       label: 'acceptEdits (auto-confirm edits, prompt for others — will FAIL in chatbot)' },
+          { value: 'auto',              label: 'auto' },
+          { value: 'default',           label: 'default (interactive — will FAIL in chatbot)' },
+          { value: 'dontAsk',           label: 'dontAsk' },
+          { value: 'plan',              label: 'plan' },
+        ],
+        help: 'Permission mode for the spawned claude process. bypassPermissions is the only mode that always works for a chatbot (nobody is sitting at the terminal to approve prompts). Other modes are exposed for experimentation but will cause tool calls to fail.',
+      },
+      max_budget_usd_per_turn: {
+        label: '--max-budget-usd', type: 'number', unit: 'USD', step: 0.01, min: 0, max: 100, default: 0,
+        help: 'Maximum USD spend per single turn. 0 = unlimited. Useful as a runaway-cost safety net.',
+        feelLike: v => v === 0 ? 'unlimited' : `cap ${v.toFixed(2)} USD/turn`,
+      },
+      add_dirs: {
+        label: '--add-dir (one per line)', type: 'array', default: [],
+        help: 'Extra directories the bot is allowed to Read/Write/Bash in (beyond the project cwd). Each line is one absolute path. Use to give the bot access to shared knowledge folders or external repos.',
+      },
+      system_prompt_override: {
+        label: '--system-prompt (override — DANGER)', type: 'textarea', default: '',
+        help: 'WARNING: Completely REPLACES Anthropic\'s default system prompt + claude code\'s tool-use guide. Leave empty in 99% of cases. If non-empty, your persona is still appended at the end so identity is preserved — but Claude loses its built-in safety + tool conventions.',
+      },
+      plugin_dirs: {
+        label: '--plugin-dir (one per line)', type: 'array', default: [],
+        help: 'Local plugin directories to load on every spawn. Each line is a path or .zip.',
+      },
+      plugin_urls: {
+        label: '--plugin-url (one per line)', type: 'array', default: [],
+        help: 'Remote plugin .zip URLs to fetch + load on every spawn.',
+      },
+      setting_sources: {
+        label: '--setting-sources', type: 'text', default: 'user,project,local',
+        help: 'Comma-separated list of settings tiers to load. Default loads all three (user = ~/.claude, project = cwd/.claude, local = cwd/.claude.local). Set to "project" to isolate the bot from your user-level CLAUDE.md and hooks.',
+      },
+      exclude_dynamic_system_prompt_sections: {
+        label: '--exclude-dynamic-system-prompt-sections', type: 'boolean', default: false,
+        help: 'Move per-machine sections (cwd, env info, memory paths, git status) from the system prompt into the first user message. Improves cross-user prompt-cache reuse. Useful for shared bots with many users.',
       },
     },
     tunablesPresets: [

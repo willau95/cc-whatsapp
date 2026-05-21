@@ -282,6 +282,7 @@ function writeFileAtomic(path: string, data: string): void {
 // ─── Tunables ──────────────────────────────────────────────────────────────
 
 type Tunables = {
+  // Humanlike batching / timing
   collect_window_ms?: number
   pre_reply_min_ms?: number
   pre_reply_max_ms?: number
@@ -290,15 +291,29 @@ type Tunables = {
   quote_reply_probability?: number
   multi_msg_max_segments?: number
   enable_typing_indicator?: boolean
-  chat_model?: string
   max_prompt_chars?: number
   length_factor_short?: number
   length_factor_medium?: number
   length_factor_long?: number
-  allowed_tools?: string[]
-  disallowed_tools?: string[]
   quiet_hours_start?: number
   quiet_hours_end?: number
+
+  // Claude Code launch flags — exposed at user request 2026-05.
+  // These map 1:1 to flags from `claude --help`. Router constructs spawn
+  // args from these on every turn; live-edit takes effect on the next turn.
+  chat_model?: string
+  fallback_model?: string
+  effort?: '' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  permission_mode?: 'bypassPermissions' | 'acceptEdits' | 'auto' | 'default' | 'dontAsk' | 'plan'
+  allowed_tools?: string[]
+  disallowed_tools?: string[]
+  add_dirs?: string[]
+  max_budget_usd_per_turn?: number
+  system_prompt_override?: string
+  plugin_dirs?: string[]
+  plugin_urls?: string[]
+  setting_sources?: string
+  exclude_dynamic_system_prompt_sections?: boolean
 }
 
 const TUNABLES_DEFAULTS: Tunables = {
@@ -310,13 +325,26 @@ const TUNABLES_DEFAULTS: Tunables = {
   quote_reply_probability: 0.4,
   multi_msg_max_segments: 4,
   enable_typing_indicator: true,
-  chat_model: 'claude-haiku-4-5-20251001',
   max_prompt_chars: 8000,
   length_factor_short: 0.5,
   length_factor_medium: 1.0,
   length_factor_long: 1.6,
+
+  // Claude Code defaults — these match prior hardcoded behavior so flipping
+  // any one of them to a non-default value is the only behavior change.
+  chat_model: 'claude-haiku-4-5-20251001',
+  fallback_model: '',
+  effort: '',                          // empty = claude code picks default
+  permission_mode: 'bypassPermissions',  // chatbot has no human to confirm
   allowed_tools: [],
   disallowed_tools: [],
+  add_dirs: [],
+  max_budget_usd_per_turn: 0,           // 0 = unlimited
+  system_prompt_override: '',           // empty = use Anthropic default + append persona
+  plugin_dirs: [],
+  plugin_urls: [],
+  setting_sources: 'user,project,local',
+  exclude_dynamic_system_prompt_sections: false,
 }
 
 function loadTunables(id: string): Tunables {
