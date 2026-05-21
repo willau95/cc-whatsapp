@@ -304,6 +304,51 @@ function app() {
       } catch {}
     },
 
+    // ─── unbind / sign out a wacli account ───
+    async unbindAccount(acct) {
+      const n = acct.projects.length
+      const projList = acct.projects.map(p => p.name).join(', ')
+      const deleteProjects = confirm(
+        `Sign out WhatsApp account "${acct.name}" (${acct.phone ? '+' + acct.phone : 'phone unknown'})?\n\n` +
+        `This will:\n` +
+        `  • Stop any router using this account\n` +
+        `  • Log out the WhatsApp linked-device session\n` +
+        `  • Remove the wacli account + store from disk\n\n` +
+        (n > 0
+          ? `${n} project(s) currently use this account: ${projList}\n\n` +
+            `OK = also DELETE those project's cc-whatsapp state (their cwd folder stays).\n` +
+            `Cancel = abort unbind.\n\n` +
+            `Choose OK to delete projects too, or click Cancel to abort entirely.`
+          : `No projects use this account.`)
+      )
+      if (n > 0 && !deleteProjects) {
+        // User cancelled the confirm — abort
+        return
+      }
+      // Second confirm for safety
+      if (!confirm(`FINAL CONFIRM: unbind "${acct.name}"${deleteProjects && n > 0 ? ' AND delete ' + n + ' project(s)' : ''}?`)) return
+
+      this.flashToast('Unbinding…')
+      const r = await fetch(`/api/wacli-accounts/${encodeURIComponent(acct.name)}/unbind`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deleteProjects: deleteProjects && n > 0 }),
+      })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Unbind failed: ' + (d.err ?? 'unknown'), 'error'); return }
+      const parts = []
+      if (d.routersStopped?.length) parts.push(`stopped ${d.routersStopped.length} router(s)`)
+      if (d.deletedProjects?.length) parts.push(`deleted ${d.deletedProjects.length} project(s)`)
+      this.flashToast(`Unbound · ${parts.join(', ') || 'done'}`)
+      await this.loadAccounts()
+      await this.refresh()
+      // If currently selected project is gone, deselect
+      if (this.selected && !this.projects.find(p => p.id === this.selected.id)) {
+        this.selectedId = null
+        this.selected = null
+        this.activeTab = 'accounts'
+      }
+    },
+
     // ─── one-click bind a detected JID to a project ───
     async bindDetectedJid(hubProjectId, jid, targetProjectId) {
       const r = await fetch(`/api/projects/${hubProjectId}/dispatcher/bindings`, {

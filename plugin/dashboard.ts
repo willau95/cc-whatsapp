@@ -1325,6 +1325,82 @@ return POSIX path of f`
       }
     }
 
+    // Unbind a wacli account — logout + remove from config + delete store.
+    // Optionally also delete all cc-whatsapp projects using this account.
+    // After unbind, the phone number is fully free for a fresh QR scan.
+    const unbindMatch = p.match(/^\/api\/wacli-accounts\/([^/]+)\/unbind$/)
+    if (unbindMatch && req.method === 'POST') {
+      const account = unbindMatch[1]!
+      const body = await req.json().catch(() => ({})) as { deleteProjects?: boolean }
+
+      // 1. Stop any project routers using this account
+      const projectsOnAccount = discoverProjects().filter(p => p.account === account)
+      const stopped: string[] = []
+      for (const proj of projectsOnAccount) {
+        if (proj.routerAlive) {
+          stopRouter(proj.id)
+          stopped.push(proj.name)
+        }
+      }
+      // wait for sync to release lock
+      await new Promise(r => setTimeout(r, 1500))
+
+      // 2. wacli auth logout (best-effort — often fails if already disconnected)
+      let logoutErr: string | null = null
+      try {
+        const r = Bun.spawnSync({
+          cmd: [CC_WHATSAPP_BIN, '--account', account, 'auth', 'logout'],
+          stdout: 'pipe', stderr: 'pipe',
+        })
+        if (r.exitCode !== 0) logoutErr = new TextDecoder().decode(r.stderr).slice(0, 200)
+      } catch (err) { logoutErr = String(err) }
+
+      // 3. accounts remove
+      let removeErr: string | null = null
+      try {
+        const r = Bun.spawnSync({
+          cmd: [CC_WHATSAPP_BIN, 'accounts', 'remove', account],
+          stdout: 'pipe', stderr: 'pipe',
+        })
+        if (r.exitCode !== 0) removeErr = new TextDecoder().decode(r.stderr).slice(0, 200)
+      } catch (err) { removeErr = String(err) }
+
+      // 4. nuke wacli store dir
+      const storeDir = account === 'main'
+        ? join(homedir(), '.wacli')   // main account uses root store
+        : join(homedir(), '.wacli', 'accounts', account)
+      if (account === 'main') {
+        // For main, only delete the *.db files (config.yaml stays)
+        try { unlinkSync(join(storeDir, 'wacli.db')) } catch {}
+        try { unlinkSync(join(storeDir, 'session.db')) } catch {}
+      } else {
+        try { rmSync(storeDir, { recursive: true, force: true }) } catch {}
+      }
+      phoneCache.delete(account)
+
+      // 5. Optionally delete project states
+      const deletedProjects: string[] = []
+      if (body.deleteProjects) {
+        for (const proj of projectsOnAccount) {
+          try {
+            rmSync(getStateDir(proj.id), { recursive: true, force: true })
+            deletedProjects.push(proj.name)
+          } catch {}
+        }
+      }
+
+      return json({
+        ok: true,
+        account,
+        routersStopped: stopped,
+        logoutWarning: logoutErr,
+        removeWarning: removeErr,
+        deletedProjects,
+        affectedProjectCount: projectsOnAccount.length,
+        notice: 'Phone number is now free. Manually unlink it from your phone\'s WhatsApp Settings → Linked Devices for a clean state.',
+      })
+    }
+
     // List existing wacli accounts (for dropdown in link/create forms)
     if (p === '/api/wacli-accounts' && req.method === 'GET') {
       try {

@@ -233,12 +233,17 @@
                   </div>
                 </template>
 
-                <div class="mt-3 pt-3 border-t border-zinc-800">
+                <div class="mt-3 pt-3 border-t border-zinc-800 flex gap-2 items-center">
                   <button x-show="acct.hubProjectId"
                           @click="select(acct.hubProjectId); activeTab = 'settings'"
                           class="text-xs px-3 py-1.5 rounded border border-emerald-700 text-emerald-300 hover:bg-emerald-900/30 flex items-center gap-1.5">
                     <span x-html="icons.settings"></span>
                     Manage bindings on hub
+                  </button>
+                  <button @click="unbindAccount(acct)"
+                          class="text-xs px-3 py-1.5 rounded border border-red-700/50 text-red-300 hover:bg-red-900/30 flex items-center gap-1.5 ml-auto">
+                    <span x-html="icons.unlink"></span>
+                    Sign out &amp; unbind WhatsApp #
                   </button>
                 </div>
               </div>
