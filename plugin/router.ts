@@ -96,23 +96,90 @@ function getProjectMode(stateDir: string): 'bot' | 'terminal-extension' {
 //     "120363yyy@g.us": "/Users/me/Projects/eva-chat"
 //
 // If no bindings/default specified, the hub IS the default project (legacy).
-function resolveTargetProject(jid: string): { stateDir: string; cwd: string; account: string } {
+// Account-level owner-personal-chat tracking. JIDs the owner has DM'd first
+// (from_me=true) are stored here, and ANY project on this account silently
+// drops subsequent traffic from those JIDs — your personal chats never reach
+// the bot pipeline.
+const CC_ACCOUNTS_DIR = join(homedir(), '.cc-whatsapp', 'accounts')
+const OWNER_PERSONAL_FILE = join(CC_ACCOUNTS_DIR, WACLI_ACCOUNT, 'owner_personal_chats.json')
+
+function loadOwnerPersonalChats(): Set<string> {
+  try { return new Set(JSON.parse(readFileSync(OWNER_PERSONAL_FILE, 'utf8'))) } catch { return new Set() }
+}
+function markOwnerPersonal(jid: string): void {
+  const s = loadOwnerPersonalChats()
+  if (s.has(jid)) return
+  s.add(jid)
+  try {
+    mkdirSync(dirname(OWNER_PERSONAL_FILE), { recursive: true, mode: 0o700 })
+    writeFileSync(OWNER_PERSONAL_FILE, JSON.stringify(Array.from(s).sort(), null, 2))
+  } catch {}
+}
+
+// Enumerate all projects on this wacli account (used for sticky + eligible auto-pick).
+type SiblingProject = { stateDir: string; cwd: string; mode: 'bot' | 'terminal-extension'; accessMode: 'open' | 'closed'; allowFrom: Set<string>; activityMtime: number }
+function listSameAccountProjects(): SiblingProject[] {
+  const projectsRoot = join(homedir(), '.cc-whatsapp', 'projects')
+  const out: SiblingProject[] = []
+  let ids: string[]
+  try { ids = readdirSync(projectsRoot) } catch { return out }
+  for (const id of ids) {
+    const stateDir = join(projectsRoot, id)
+    let cfg: any
+    try { cfg = JSON.parse(readFileSync(join(stateDir, 'config.json'), 'utf8')) } catch { continue }
+    if (cfg.account !== WACLI_ACCOUNT) continue
+    if (!cfg.project_path || !existsSync(cfg.project_path)) continue
+    let access: any = { allowFrom: [], mode: 'open' }
+    try { access = JSON.parse(readFileSync(join(stateDir, 'access.json'), 'utf8')) } catch {}
+    const mode: 'bot' | 'terminal-extension' = (cfg.mode === 'terminal-extension') ? 'terminal-extension' :
+                                                (cfg.mode === 'bot') ? 'bot' :
+                                                (existsSync(join(stateDir, 'agent', 'IDENTITY.md')) ? 'bot' : 'terminal-extension')
+    let mtime = 0
+    try { mtime = statSync(join(stateDir, 'trace.log')).mtimeMs } catch {}
+    out.push({
+      stateDir, cwd: cfg.project_path, mode,
+      accessMode: (access.mode === 'closed' ? 'closed' : 'open'),
+      allowFrom: new Set(access.allowFrom ?? []),
+      activityMtime: mtime,
+    })
+  }
+  return out
+}
+
+// 5-tier resolution. See top-of-file comment for full design.
+function resolveTargetProject(jid: string): { stateDir: string; cwd: string; account: string; resolvedBy: string } {
   const cfg = loadProjectConfig()
   const bindings = cfg.bindings ?? {}
-  const isGroup = jid.endsWith('@g.us')
 
-  // 1. Group JID → look in bindings (value = target project's original cwd)
-  if (isGroup && bindings[jid]) {
+  // ❶ Explicit binding (groups OR DMs the user explicitly bound)
+  if (bindings[jid]) {
     const cwd = bindings[jid]!
-    return { stateDir: stateDirFor(cwd), cwd, account: WACLI_ACCOUNT }
+    return { stateDir: stateDirFor(cwd), cwd, account: WACLI_ACCOUNT, resolvedBy: 'binding' }
   }
-  // 2. DM (or unbound group) → defaultProject if set, else hub itself
-  if (cfg.defaultProject && cfg.defaultProject !== HUB_PROJECT_PATH) {
-    const cwd = cfg.defaultProject
-    return { stateDir: stateDirFor(cwd), cwd, account: WACLI_ACCOUNT }
+
+  const siblings = listSameAccountProjects()
+
+  // ❷ Sticky: any sibling has this JID in its allowFrom → that's home
+  const sticky = siblings.find(p => p.allowFrom.has(jid))
+  if (sticky) {
+    return { stateDir: sticky.stateDir, cwd: sticky.cwd, account: WACLI_ACCOUNT, resolvedBy: 'sticky_allowFrom' }
   }
-  // 3. Hub is target (no dispatcher configured / single-project mode)
-  return { stateDir: STATE_DIR, cwd: HUB_PROJECT_PATH, account: WACLI_ACCOUNT }
+
+  // ❹ Explicit default
+  if (cfg.defaultProject && cfg.defaultProject !== HUB_PROJECT_PATH && existsSync(cfg.defaultProject)) {
+    return { stateDir: stateDirFor(cfg.defaultProject), cwd: cfg.defaultProject, account: WACLI_ACCOUNT, resolvedBy: 'explicit_default' }
+  }
+
+  // ❺ Eligible auto-pick: bot-mode + open access projects, sorted by recent activity
+  const eligible = siblings.filter(p => p.mode === 'bot' && p.accessMode === 'open')
+  if (eligible.length > 0) {
+    eligible.sort((a, b) => b.activityMtime - a.activityMtime)
+    const picked = eligible[0]!
+    return { stateDir: picked.stateDir, cwd: picked.cwd, account: WACLI_ACCOUNT, resolvedBy: `eligible_auto(${eligible.length} candidates)` }
+  }
+
+  // Last resort: hub (likely drops if its access is closed — that's correct, no eligible target)
+  return { stateDir: STATE_DIR, cwd: HUB_PROJECT_PATH, account: WACLI_ACCOUNT, resolvedBy: 'hub_fallback' }
 }
 
 // ─── Contact memory v2 ─────────────────────────────────────────────────────
@@ -933,13 +1000,34 @@ const server = (globalThis as any).Bun.serve({
 
       // ── DISPATCHER: figure out target project for this JID ─────────
       const target = resolveTargetProject(evt.Chat)
+      trace('resolve_target', { jid: evt.Chat, project: target.cwd, via: target.resolvedBy })
       const targetAccessFile = join(target.stateDir, 'access.json')
       let targetAccess: any = { allowFrom: [], mode: 'open' }
       try { targetAccess = JSON.parse(readFileSync(targetAccessFile, 'utf8')) } catch {}
 
       if (targetAccess.disabled) { trace('drop_disabled', { jid: evt.Chat, project: target.cwd }); return new Response('ok') }
-      if (evt.FromMe === true || evt.Revoked === true) {
-        trace('drop_from_me_or_revoked', { jid: evt.Chat })
+
+      // OWNER-PERSONAL-CHAT detection — account-level. The bot's phone is
+      // also the owner's personal phone. Friend chats must not enter the bot
+      // pipeline. JIDs the owner ever sent to (from_me=true) are remembered
+      // permanently and all subsequent traffic on those JIDs is silently
+      // dropped regardless of routing target.
+      const personal = loadOwnerPersonalChats()
+
+      if (evt.FromMe === true && !personal.has(evt.Chat)) {
+        markOwnerPersonal(evt.Chat)
+        trace('owner_personal_chat_marked', { jid: evt.Chat })
+      }
+      if (evt.Revoked === true) {
+        trace('drop_revoked', { jid: evt.Chat })
+        return new Response('ok')
+      }
+      if (evt.FromMe === true) {
+        trace('drop_from_me', { jid: evt.Chat })
+        return new Response('ok')
+      }
+      if (personal.has(evt.Chat)) {
+        trace('drop_owner_personal_chat', { jid: evt.Chat })
         return new Response('ok')
       }
 
