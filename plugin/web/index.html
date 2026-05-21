@@ -46,7 +46,13 @@
 
   <button @click="refresh()" class="text-xs px-3 py-1.5 rounded border border-zinc-700 hover:bg-zinc-800 flex items-center gap-1.5"><span x-html="icons.refresh" class="text-sm"></span>Refresh</button>
 
-  <button x-show="selected && selected.paired && !selected.routerAlive" @click="startRouter()"
+  <button x-show="selected && selected.paired && !selected.routerAlive && (() => {
+            const myAcct = accounts.find(a => a.name === selected?.account);
+            // Hide Start button for SATELLITE projects (hub handles routing).
+            // Show only when this is the hub OR no hub exists yet on this account.
+            return !myAcct || !myAcct.hubProjectId || myAcct.hubProjectId === selected?.id;
+          })()"
+          @click="startRouter()"
           :disabled="routerBusy"
           :class="routerBusy ? 'opacity-50 cursor-not-allowed' : ''"
           class="text-xs px-3 py-1.5 rounded bg-brand-600 hover:bg-brand-500 text-white flex items-center gap-1.5">
@@ -170,10 +176,20 @@
                     <span x-html="icons.folder" class="text-zinc-400"></span>
                     <button @click="select(p.id); activeTab = 'overview'" class="flex-1 text-left text-sm hover:text-emerald-400">
                       <span class="font-medium" x-text="p.name"></span>
-                      <span class="text-xs text-zinc-500 ml-2" x-text="p.id === acct.hubProjectId ? '(hub · holds dispatcher)' : ''"></span>
+                      <span class="text-xs text-emerald-300 ml-2" x-show="p.id === acct.hubProjectId">(hub · routes for everyone)</span>
+                      <span class="text-xs text-blue-300 ml-2" x-show="p.id !== acct.hubProjectId && acct.hubProjectId">(satellite · routed by hub)</span>
                       <div class="text-xs text-zinc-600 font-mono truncate" x-text="p.path"></div>
                     </button>
-                    <span x-show="p.routerAlive" class="text-xs text-emerald-400">live</span>
+                    <!-- Status label, but only meaningful for the hub. Satellites don't run their own router. -->
+                    <template x-if="p.id === acct.hubProjectId">
+                      <span :class="p.routerAlive ? 'text-emerald-400' : 'text-amber-400'" class="text-xs flex items-center gap-1">
+                        <span x-html="icons.dot"></span>
+                        <span x-text="p.routerAlive ? 'live' : 'stopped'"></span>
+                      </span>
+                    </template>
+                    <template x-if="p.id !== acct.hubProjectId && acct.hubProjectId">
+                      <span class="text-xs text-zinc-500" title="Satellites don't run their own router — the hub dispatches">no router needed</span>
+                    </template>
                   </div>
                 </template>
 
@@ -306,6 +322,22 @@
             <span x-html="icons.terminal"></span>
             <span>Open Claude here</span>
           </button>
+        </div>
+
+        <!-- Satellite-project explainer (no router needed; hub routes for it) -->
+        <div x-show="(() => {
+              const myAcct = accounts.find(a => a.name === selected?.account);
+              return myAcct && myAcct.hubProjectId && myAcct.hubProjectId !== selected?.id;
+            })()" class="mb-6 bg-blue-900/10 border border-blue-700/30 rounded-xl p-4">
+          <div class="flex items-start gap-3">
+            <span class="text-blue-400 text-xl mt-0.5" x-html="icons.info"></span>
+            <div class="flex-1">
+              <p class="font-bold text-blue-300 mb-1">Satellite project — no router needed</p>
+              <p class="text-xs text-zinc-400 leading-relaxed">
+                This project shares account <code x-text="selected?.account"></code> with another project that runs the router (the hub). The hub dispatches incoming messages here based on the binding configured on its dispatcher. You don't need to start a router for THIS project — it would conflict with the hub's wacli store lock.
+              </p>
+            </div>
+          </div>
         </div>
 
         <!-- Terminal-extension explainer -->
