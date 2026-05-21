@@ -168,7 +168,15 @@ function isPidAlive(pid: number | undefined): boolean {
   try { process.kill(pid, 0); return true } catch { return false }
 }
 
+// SECURITY: validate project id matches the base64url charset BEFORE we use it
+// in any filesystem operation. Without this, an id of ".." or "../foo" would
+// make getStateDir return a path that escapes CC_PROJECTS_DIR, and rmSync
+// on that path would obliterate state for unrelated projects (or worse).
+const VALID_ID_RE = /^[A-Za-z0-9_-]+$/
 function getStateDir(id: string): string {
+  if (!VALID_ID_RE.test(id)) {
+    throw new Error(`invalid project id: ${id.slice(0, 50)} (must be base64url chars only)`)
+  }
   return join(CC_PROJECTS_DIR, id)
 }
 
