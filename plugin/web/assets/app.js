@@ -318,14 +318,17 @@ function app() {
         eventSource: null,
       }
     },
-    closeLinkExisting() {
+    async closeLinkExisting() {
       if (this.linkExisting.eventSource) { try { this.linkExisting.eventSource.close() } catch {} }
       if (this.linkExisting.newProjectId && (this.linkExisting.step === 3 || this.linkExisting.pairStatus === 'paired')) {
-        this.refresh().then(() => {
-          this.select(this.linkExisting.newProjectId)
-          this.activeTab = 'overview'
-          this.linkExisting.open = false
-        })
+        // Critical: await refresh + select BEFORE setting activeTab + closing modal.
+        // Otherwise there's a brief window where activeTab='overview' but
+        // selected=null → empty-fallback shows "← Go to Projects" and user
+        // perceives a bounce-back.
+        await this.refresh()
+        await this.select(this.linkExisting.newProjectId)
+        this.activeTab = 'overview'
+        this.linkExisting.open = false
       } else {
         this.linkExisting.open = false
       }
@@ -348,6 +351,14 @@ function app() {
         this.linkExisting.newProjectId = d.id
         this.linkExisting.warnings = d.warnings ?? []
         await this.refresh()
+        // Reusing an already-paired wacli account → skip QR scan, go straight to Done
+        const proj = this.projects.find(p => p.id === d.id)
+        if (proj?.paired) {
+          this.linkExisting.pairStatus = 'paired'
+          this.linkExisting.step = 3
+          this.flashToast('Account already paired — no QR needed')
+          return
+        }
         this.linkExisting.step = 2
         await this.linkExistingStartPair()
       } finally {
@@ -836,21 +847,49 @@ function app() {
     },
 
     // ─── router control ───
+    routerBusy: false,             // blocks button clicks during start/stop
+    routerBusyMsg: '',
+    routerLastError: null,         // { msg, traceTail } — shown until user dismisses
     async startRouter() {
-      const r = await fetch(`/api/projects/${this.selectedId}/router/start`, { method: 'POST' })
-      const d = await r.json()
-      if (!d.ok) { this.flashToast('Start failed: ' + (d.err ?? 'unknown'), 'error'); return }
-      this.flashToast('Router started')
-      setTimeout(() => this.refresh(), 2000)
+      if (this.routerBusy) return
+      this.routerBusy = true
+      this.routerBusyMsg = 'Starting router — waiting 3s to verify it stays alive…'
+      this.routerLastError = null
+      try {
+        const r = await fetch(`/api/projects/${this.selectedId}/router/start`, { method: 'POST' })
+        const d = await r.json()
+        await this.refresh()    // pull latest routerAlive
+        if (!d.ok) {
+          this.routerLastError = { msg: d.err ?? 'unknown error', traceTail: d.trace_tail ?? '' }
+          this.flashToast('Router failed to start — see banner', 'error')
+        } else {
+          this.flashToast('Router started · PID ' + d.pid)
+        }
+      } catch (err) {
+        this.routerLastError = { msg: 'network error: ' + err, traceTail: '' }
+      } finally {
+        this.routerBusy = false
+        this.routerBusyMsg = ''
+      }
     },
     async stopRouter() {
+      if (this.routerBusy) return
       if (!confirm('Stop the router? The bot will go offline immediately.')) return
-      const r = await fetch(`/api/projects/${this.selectedId}/router/stop`, { method: 'POST' })
-      const d = await r.json()
-      if (!d.ok) { this.flashToast('Stop failed: ' + (d.err ?? 'unknown'), 'error'); return }
-      this.flashToast('Router stopped')
-      setTimeout(() => this.refresh(), 1500)
+      this.routerBusy = true
+      this.routerBusyMsg = 'Stopping router…'
+      try {
+        const r = await fetch(`/api/projects/${this.selectedId}/router/stop`, { method: 'POST' })
+        const d = await r.json()
+        if (!d.ok) { this.flashToast('Stop failed: ' + (d.err ?? 'unknown'), 'error') }
+        else { this.flashToast('Router stopped') }
+        await new Promise(r => setTimeout(r, 1000))
+        await this.refresh()
+      } finally {
+        this.routerBusy = false
+        this.routerBusyMsg = ''
+      }
     },
+    dismissRouterError() { this.routerLastError = null },
 
     // ─── save/discard all ───
     isDirty() {

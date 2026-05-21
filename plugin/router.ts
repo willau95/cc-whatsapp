@@ -24,11 +24,13 @@ import { fileURLToPath } from 'url'
 const PLUGIN_ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = dirname(PLUGIN_ROOT)
 
-// ─── Per-project state dir ───
-// Convention: <consumer-project>/.claude/cc-whatsapp/
-// Override with env if launching outside a project root.
+// ─── State dir architecture (centralized) ───
+// State lives at ~/.cc-whatsapp/projects/<id>/, NOT inside the project itself.
+// Avoids macOS TCC issues when projects sit in Desktop/Documents/iCloud.
+// env CC_WHATSAPP_PROJECT_DIR is the absolute path to this state dir, set by
+// the dashboard-generated run.command.
 const STATE_DIR = process.env.CC_WHATSAPP_PROJECT_DIR
-              ?? join(process.cwd(), '.claude', 'cc-whatsapp')
+              ?? join(homedir(), '.cc-whatsapp', 'projects', 'default')
 
 const ACCESS_FILE   = join(STATE_DIR, 'access.json')
 const SECRET_FILE   = join(STATE_DIR, '.secret')
@@ -60,11 +62,19 @@ const MAX_PROMPT_CHARS = 8_000
 // ─── Per-project wacli account ───
 // Each project pairs its own WhatsApp number under wacli's multi-account
 // system. Account name is set by /cc-whatsapp:init wizard.
-function loadProjectConfig(): { account?: string; ownerJid?: string; port?: number; defaultProject?: string; bindings?: Record<string, string>; mode?: string } {
+function loadProjectConfig(): { account?: string; ownerJid?: string; port?: number; defaultProject?: string; bindings?: Record<string, string>; mode?: string; project_path?: string } {
   try { return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) }
   catch { return {} }
 }
 const WACLI_ACCOUNT = loadProjectConfig().account ?? 'main'
+const HUB_PROJECT_PATH = loadProjectConfig().project_path ?? process.cwd()
+
+// Map a project cwd → its central state dir (~/.cc-whatsapp/projects/<id>/).
+// `id` = base64url(absPath) — same encoding dashboard uses.
+function stateDirFor(projectPath: string): string {
+  const id = Buffer.from(projectPath).toString('base64url')
+  return join(homedir(), '.cc-whatsapp', 'projects', id)
+}
 
 // Project mode — bot (full chatbot) vs terminal-extension (lean, owner-only).
 // Per-spawn lookup since dispatcher routes to different projects.
@@ -91,18 +101,18 @@ function resolveTargetProject(jid: string): { stateDir: string; cwd: string; acc
   const bindings = cfg.bindings ?? {}
   const isGroup = jid.endsWith('@g.us')
 
-  // 1. Group JID → look in bindings
+  // 1. Group JID → look in bindings (value = target project's original cwd)
   if (isGroup && bindings[jid]) {
     const cwd = bindings[jid]!
-    return { stateDir: join(cwd, '.claude', 'cc-whatsapp'), cwd, account: WACLI_ACCOUNT }
+    return { stateDir: stateDirFor(cwd), cwd, account: WACLI_ACCOUNT }
   }
-  // 2. DM (or unbound group) → default project (or hub itself)
-  if (cfg.defaultProject && cfg.defaultProject !== STATE_DIR.replace(/\.claude\/cc-whatsapp\/?$/, '').replace(/\/$/, '')) {
+  // 2. DM (or unbound group) → defaultProject if set, else hub itself
+  if (cfg.defaultProject && cfg.defaultProject !== HUB_PROJECT_PATH) {
     const cwd = cfg.defaultProject
-    return { stateDir: join(cwd, '.claude', 'cc-whatsapp'), cwd, account: WACLI_ACCOUNT }
+    return { stateDir: stateDirFor(cwd), cwd, account: WACLI_ACCOUNT }
   }
-  // 3. No dispatcher configured → hub is target (legacy / single-project mode)
-  return { stateDir: STATE_DIR, cwd: STATE_DIR.replace(/\.claude\/cc-whatsapp\/?$/, '').replace(/\/$/, ''), account: WACLI_ACCOUNT }
+  // 3. Hub is target (no dispatcher configured / single-project mode)
+  return { stateDir: STATE_DIR, cwd: HUB_PROJECT_PATH, account: WACLI_ACCOUNT }
 }
 
 // ─── Contact memory v2 ─────────────────────────────────────────────────────

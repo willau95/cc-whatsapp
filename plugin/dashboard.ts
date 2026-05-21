@@ -38,27 +38,33 @@ const TEMPLATES_PLAYBOOKS = join(PLUGIN_ROOT, 'templates', 'playbooks')
 const PORT = Number(process.env.CC_WHATSAPP_DASHBOARD_PORT ?? 38500)
 const CC_WHATSAPP_BIN = join(REPO_ROOT, 'bin', 'cc-whatsapp')
 
-// ─── Project discovery ─────────────────────────────────────────────────────
+// ─── Centralized state architecture ───────────────────────────────────────
+// State now lives at ~/.cc-whatsapp/projects/<id>/, NOT inside the project.
+// Each project's config.json carries `project_path` (the original cwd, used
+// as claude's cwd when spawning so CLAUDE.md auto-loads from there).
+// Discovery just scans the central projects dir — no filesystem-roots scan.
+
+const CC_HOME = join(homedir(), '.cc-whatsapp')
+const CC_PROJECTS_DIR = join(CC_HOME, 'projects')
 
 function discoverProjects(): Project[] {
-  const found = new Map<string, Project>()
-  const roots = [
-    join(homedir(), 'Projects'),
-    homedir(),
-  ]
-  for (const root of roots) {
-    if (!existsSync(root)) continue
-    let entries: string[]
-    try { entries = readdirSync(root) } catch { continue }
-    for (const name of entries) {
-      const abs = join(root, name)
-      const cfgPath = join(abs, '.claude', 'cc-whatsapp', 'config.json')
-      if (existsSync(cfgPath) && !found.has(abs)) {
-        found.set(abs, projectInfo(abs))
-      }
+  if (!existsSync(CC_PROJECTS_DIR)) return []
+  const out: Project[] = []
+  let ids: string[]
+  try { ids = readdirSync(CC_PROJECTS_DIR) } catch { return [] }
+  for (const id of ids) {
+    const stateDir = join(CC_PROJECTS_DIR, id)
+    const cfgPath = join(stateDir, 'config.json')
+    if (!existsSync(cfgPath)) continue
+    const cfg = readJsonSafe(cfgPath)
+    if (!cfg?.project_path) continue
+    if (!existsSync(cfg.project_path)) {
+      // Orphan: project dir was deleted/renamed. Skip (or surface later).
+      continue
     }
+    out.push(projectInfo(cfg.project_path, id))
   }
-  return Array.from(found.values()).sort((a, b) => a.name.localeCompare(b.name))
+  return out.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 type Project = {
@@ -91,8 +97,9 @@ function idToPath(id: string): string {
   return Buffer.from(id, 'base64url').toString('utf8')
 }
 
-function projectInfo(absPath: string): Project {
-  const stateDir = join(absPath, '.claude', 'cc-whatsapp')
+function projectInfo(absPath: string, id?: string): Project {
+  if (!id) id = pathToId(absPath)
+  const stateDir = join(CC_PROJECTS_DIR, id)
   const cfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
   const access = readJsonSafe(join(stateDir, 'access.json')) ?? {}
   const routerPid = readPidSafe(join(stateDir, 'router.pid'))
@@ -104,15 +111,12 @@ function projectInfo(absPath: string): Project {
   } catch {}
   const account = cfg.account ?? 'main'
   const health = readJsonSafe(join(stateDir, 'health.json')) ?? undefined
-  // Mode auto-derivation for legacy projects without the field:
-  //   has agent/IDENTITY.md → 'bot' (it was created via createProject)
-  //   no persona files     → 'terminal-extension'
   let mode: 'bot' | 'terminal-extension' = cfg.mode
   if (!mode) {
     mode = existsSync(join(stateDir, 'agent', 'IDENTITY.md')) ? 'bot' : 'terminal-extension'
   }
   return {
-    id: pathToId(absPath),
+    id,
     path: absPath,
     name: absPath.split('/').filter(Boolean).pop() ?? absPath,
     account,
@@ -165,7 +169,7 @@ function isPidAlive(pid: number | undefined): boolean {
 }
 
 function getStateDir(id: string): string {
-  return join(idToPath(id), '.claude', 'cc-whatsapp')
+  return join(CC_PROJECTS_DIR, id)
 }
 
 function writeJsonAtomic(path: string, data: any): void {
@@ -621,7 +625,8 @@ function linkExistingProject(opts: { projectDir: string; account: string; ownerJ
     if (!st.isDirectory()) return { ok: false, err: `not a directory: ${projectDir}` }
   } catch (err) { return { ok: false, err: String(err) } }
 
-  const stateDir = join(projectDir, '.claude', 'cc-whatsapp')
+  const id = pathToId(projectDir)
+  const stateDir = join(CC_PROJECTS_DIR, id)
   if (existsSync(join(stateDir, 'config.json'))) {
     return { ok: false, err: `already a cc-whatsapp project: ${projectDir}` }
   }
@@ -643,6 +648,7 @@ function linkExistingProject(opts: { projectDir: string; account: string; ownerJ
   writeJsonAtomic(join(stateDir, 'config.json'), {
     account,
     mode: 'terminal-extension',
+    project_path: projectDir,
     ...(opts.ownerJid ? { ownerJid: opts.ownerJid } : {}),
   })
   // mode:'closed' = strict allowlist (owner-only is the point of terminal-extension).
@@ -667,7 +673,6 @@ function linkExistingProject(opts: { projectDir: string; account: string; ownerJ
     enable_typing_indicator: false,   // no fake typing
   })
 
-  const id = pathToId(projectDir)
   generateRunCommand(id)
   return { ok: true, id, warnings, sessionUuid }
 }
@@ -691,7 +696,8 @@ function createProject(opts: { parentDir: string; name: string; account: string;
     if (existsSync(cfgPath)) return { ok: false, err: `${projectPath} already exists as a cc-whatsapp project` }
   }
   mkdirSync(projectPath, { recursive: true })
-  const stateDir = join(projectPath, '.claude', 'cc-whatsapp')
+  const id = pathToId(projectPath)
+  const stateDir = join(CC_PROJECTS_DIR, id)
   const agentDir = join(stateDir, 'agent')
   const contactsDir = join(agentDir, 'contacts')
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
@@ -699,8 +705,8 @@ function createProject(opts: { parentDir: string; name: string; account: string;
   mkdirSync(contactsDir, { recursive: true, mode: 0o700 })
 
   // mode='bot' (default) — full chatbot with personas, playbooks, humanlike batching.
-  // (linkExistingProject below uses mode='terminal-extension' for the alternate model.)
-  writeJsonAtomic(join(stateDir, 'config.json'), { account, mode: 'bot' })
+  // project_path is the original cwd — claude spawns there (CLAUDE.md auto-loads from it).
+  writeJsonAtomic(join(stateDir, 'config.json'), { account, mode: 'bot', project_path: projectPath })
   // mode:'open' = anyone can message + bot auto-onboards them (default for bot mode).
   writeJsonAtomic(join(stateDir, 'access.json'), { allowFrom: [], mode: 'open' })
   writeJsonAtomic(join(stateDir, 'sessions.json'), {})
@@ -723,7 +729,6 @@ function createProject(opts: { parentDir: string; name: string; account: string;
     if (existsSync(src)) copyFileSync(src, join(contactsDir, 'TEMPLATE.md'))
   } catch {}
 
-  const id = pathToId(projectPath)
   // Generate run.command for one-click router start
   generateRunCommand(id)
   return { ok: true, id }
@@ -758,39 +763,91 @@ function getOrAssignRouterPort(id: string): number {
   return port
 }
 
-function startRouter(id: string): { ok: boolean; pid?: number; err?: string } {
+async function startRouter(id: string): Promise<{ ok: boolean; pid?: number; err?: string; trace_tail?: string }> {
   const path = idToPath(id)
   const stateDir = getStateDir(id)
   const cfg = readJsonSafe(join(stateDir, 'config.json'))
   if (!cfg?.account) return { ok: false, err: 'no config.account — initialize first' }
   if (!isAccountPaired(cfg.account)) return { ok: false, err: `account "${cfg.account}" not paired yet — run pair first` }
+
+  // Check if account's wacli store is already locked by another router (port collision is
+  // separate — store lock is the bigger issue when multiple projects share an account).
+  // We CAN'T pre-check the lock cheaply, so we rely on post-spawn verification below.
+
   const runCmd = routerLaunchScript(id)
-  // Always regenerate — picks up port assignments + any template updates.
   generateRunCommand(id)
-  const child = spawn('bash', [runCmd], {
-    cwd: path,
+
+  // Capture stderr to a file so if router dies fast we can report WHY.
+  const errLog = join(stateDir, '.start-stderr.log')
+  try { writeFileSync(errLog, '') } catch {}
+
+  // Spawn detached + capture stderr (via shell redirect, since detached suppresses our pipe)
+  const child = spawn('bash', ['-c', `exec bash "${runCmd}" 2>"${errLog}"`], {
+    cwd: stateDir,   // stateDir is ~/.cc-whatsapp/projects/<id>/, always accessible
     stdio: ['ignore', 'ignore', 'ignore'],
     env: { ...process.env },
     detached: true,
   })
   child.unref()
-  return { ok: true, pid: child.pid }
+  const spawnedPid = child.pid
+
+  // Wait up to 3s, then verify the router process is actually alive AND wrote to trace.log
+  await new Promise(r => setTimeout(r, 3000))
+
+  // The PID we got is the bash wrapper. Look up the actual router PID from
+  // the project's router.pid file (router.ts writes its own PID on startup).
+  const routerPidFile = join(stateDir, 'router.pid')
+  let actualPid: number | undefined
+  try { actualPid = parseInt(readFileSync(routerPidFile, 'utf8').trim(), 10) } catch {}
+
+  const traceLog = join(stateDir, 'trace.log')
+  const traceExists = existsSync(traceLog)
+  let traceTail = ''
+  if (traceExists) {
+    try {
+      const lines = readFileSync(traceLog, 'utf8').trimEnd().split('\n')
+      traceTail = lines.slice(-5).join('\n')
+    } catch {}
+  }
+
+  // Read whatever the launcher / router printed to stderr
+  let errOutput = ''
+  try { errOutput = readFileSync(errLog, 'utf8').slice(-1000) } catch {}
+
+  if (actualPid && isPidAlive(actualPid)) {
+    return { ok: true, pid: actualPid, trace_tail: traceTail }
+  }
+
+  // Router DIDN'T start successfully — explain why
+  let err = 'router process exited shortly after spawn'
+  if (errOutput.trim()) err = `router exited — stderr: ${errOutput.trim().slice(0, 400)}`
+  if (errOutput.includes('Operation not permitted')) {
+    err = `macOS Desktop/Documents folder access denied. Grant access to Bun (or run dashboard from a Terminal with the perm) — System Settings → Privacy & Security → Files and Folders. Then retry.`
+  } else if (errOutput.includes('store is locked')) {
+    err = `wacli store is locked (account "${cfg.account}" already in use by another project's router). Stop the other router first.`
+  } else if (errOutput.includes('EADDRINUSE')) {
+    err = `port already in use — check config.json port field, restart dashboard so it picks a new one.`
+  }
+  return { ok: false, pid: spawnedPid, err, trace_tail: traceTail }
 }
 
 function generateRunCommand(id: string): void {
-  const path = idToPath(id)
+  const projectPath = idToPath(id)
   const stateDir = getStateDir(id)
   const port = getOrAssignRouterPort(id)
-  const title = `cc-whatsapp · ${path.split('/').pop()}`
+  const title = `cc-whatsapp · ${projectPath.split('/').pop()}`
+  // cwd of the launcher = stateDir (in ~/.cc-whatsapp/, no TCC issue).
+  // Router internally spawns claude with cwd=projectPath; claude has its own
+  // TCC permission for Desktop/Documents so it works regardless.
   const content = `#!/bin/zsh
 # Generated by cc-whatsapp dashboard
-PROJECT="${path}"
+STATE_DIR="${stateDir}"
 REPO="${REPO_ROOT}"
 TITLE="${title}"
-cd "$PROJECT" || exit 1
-pkill -9 -f "router.ts.*$PROJECT" 2>/dev/null
+cd "$STATE_DIR" || exit 1
+pkill -9 -f "router.ts.*$STATE_DIR" 2>/dev/null
 sleep 0.5
-export CC_WHATSAPP_PROJECT_DIR="$PROJECT/.claude/cc-whatsapp"
+export CC_WHATSAPP_PROJECT_DIR="$STATE_DIR"
 export CC_WHATSAPP_BIN="$REPO/bin/cc-whatsapp"
 export CC_WHATSAPP_PORT=${port}
 exec bun "$REPO/plugin/router.ts"
@@ -1383,7 +1440,7 @@ const server = (globalThis as any).Bun.serve({
 
       // ROUTER CONTROL
       if (sub === '/router/start' && req.method === 'POST') {
-        return json(startRouter(id))
+        return json(await startRouter(id))
       }
       if (sub === '/router/stop' && req.method === 'POST') {
         return json(stopRouter(id))
@@ -1527,11 +1584,11 @@ const server = (globalThis as any).Bun.serve({
 
       // PROJECT DELETE
       if (sub === '' && req.method === 'DELETE') {
-        const projPath = idToPath(id)
-        // Stop router first, then nuke the .claude/cc-whatsapp dir only (leave project folder alone)
+        // Stop router first, then nuke the state dir in ~/.cc-whatsapp/projects/
+        // (leaves the project folder itself completely untouched)
         stopRouter(id)
         try {
-          rmSync(join(projPath, '.claude', 'cc-whatsapp'), { recursive: true, force: true })
+          rmSync(getStateDir(id), { recursive: true, force: true })
           return json({ ok: true })
         } catch (err) {
           return json({ ok: false, err: String(err) }, 500)
