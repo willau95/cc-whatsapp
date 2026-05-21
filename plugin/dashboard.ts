@@ -72,6 +72,7 @@ type Project = {
   path: string
   name: string
   account: string
+  phone?: string
   mode: 'bot' | 'terminal-extension'
   routerAlive: boolean
   routerPid?: number
@@ -120,6 +121,7 @@ function projectInfo(absPath: string, id?: string): Project {
     path: absPath,
     name: absPath.split('/').filter(Boolean).pop() ?? absPath,
     account,
+    phone: getAccountPhone(account),
     mode,
     routerAlive: isPidAlive(routerPid),
     routerPid,
@@ -132,6 +134,23 @@ function projectInfo(absPath: string, id?: string): Project {
     ownerJid: cfg.ownerJid,
     health,
   }
+}
+
+// Phone-number cache. Resolves via `cc-whatsapp --account X auth status --json`
+// which returns the linked phone. ~50ms shell per uncached lookup.
+const phoneCache = new Map<string, string>()
+function getAccountPhone(account: string): string | undefined {
+  if (phoneCache.has(account)) return phoneCache.get(account)
+  try {
+    const r = Bun.spawnSync({
+      cmd: [CC_WHATSAPP_BIN, '--account', account, 'auth', 'status', '--json'],
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    const parsed = JSON.parse(new TextDecoder().decode(r.stdout))
+    const phone = parsed?.data?.phone
+    if (phone) { phoneCache.set(account, phone); return phone }
+  } catch {}
+  return undefined
 }
 
 // An account is "paired" if cc-whatsapp lists it AND its store .db is sizable.
@@ -504,7 +523,10 @@ function listAccounts(): Array<{ name: string; phone?: string; paired: boolean; 
   for (const acctName of all) {
     const projs = byAccount.get(acctName) ?? []
     const wcli = wacliAccts.find(a => a.name === acctName)
-    const phone = isAccountPaired(acctName) ? (wcli?.linked_jid ?? wcli?.phone ?? undefined) : undefined
+    // Phone: prefer authoritative `auth status` lookup, fallback to listed linked_jid
+    const phone = isAccountPaired(acctName)
+      ? (getAccountPhone(acctName) ?? wcli?.linked_jid ?? wcli?.phone ?? undefined)
+      : undefined
     // Hub = the project that owns the dispatcher (first one with bindings, else first one with router alive, else first)
     const hub = projs.find(p => Object.keys(readDispatcher(p.id).bindings).length > 0)
               ?? projs.find(p => p.routerAlive)

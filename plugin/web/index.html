@@ -157,8 +157,11 @@
               <header class="px-5 py-4 border-b border-zinc-800 flex items-center gap-3">
                 <span class="text-2xl text-emerald-400" x-html="icons.phone"></span>
                 <div class="flex-1 min-w-0">
-                  <div class="font-bold font-mono" x-text="acct.name"></div>
-                  <div class="text-xs text-zinc-500" x-text="acct.phone || (acct.paired ? 'paired (no phone#)' : 'NOT paired')"></div>
+                  <div class="font-bold font-mono flex items-baseline gap-2">
+                    <span x-text="acct.name"></span>
+                    <span x-show="acct.phone" class="text-emerald-300/90 text-sm" x-text="'+' + acct.phone"></span>
+                  </div>
+                  <div class="text-xs text-zinc-500" x-show="!acct.phone" x-text="acct.paired ? 'paired (phone unknown)' : 'NOT paired'"></div>
                 </div>
                 <span :class="acct.paired && acct.routerAlive ? 'text-emerald-400' : (acct.paired ? 'text-zinc-500' : 'text-amber-400')" class="text-xs flex items-center gap-1.5">
                   <span x-html="icons.dot"></span>
@@ -283,7 +286,11 @@
                     <span :class="projectRoleClass(p)" class="text-[10px] px-1.5 py-0.5 rounded font-mono uppercase tracking-wider"
                           x-text="projectRoleLabel(p)"></span>
                   </div>
-                  <div class="text-xs text-zinc-500 font-mono truncate" x-text="p.account + ' · ' + p.path"></div>
+                  <div class="text-xs text-zinc-500 font-mono truncate">
+                    <span x-text="p.account"></span>
+                    <span x-show="p.phone" class="text-emerald-300/80" x-text="' · +' + p.phone"></span>
+                    <span x-text="' · ' + p.path"></span>
+                  </div>
 
                   <!-- HUB or SOLO: traditional stats -->
                   <template x-if="projectRole(p) === 'hub' || projectRole(p) === 'solo'">
@@ -426,6 +433,7 @@
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
             <div class="text-xs text-zinc-500 mb-1">Account</div>
             <div class="font-mono text-lg" x-text="selected?.account ?? '—'"></div>
+            <div x-show="selected?.phone" class="font-mono text-sm text-emerald-300/90 mt-0.5" x-text="'+' + selected?.phone"></div>
             <div class="text-xs text-zinc-500 mt-1" x-text="selected?.paired ? 'paired ✓' : 'NOT paired'"></div>
           </div>
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
