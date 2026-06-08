@@ -276,9 +276,15 @@ type Tunables = {
   setting_sources: string
   exclude_dynamic_system_prompt_sections: boolean
 }
-function tunables(): Tunables {
+// tunables(forStateDir?) — when called with a target project's state dir, reads
+// THAT project's tunables.json. Without arg, reads the hub's (router's own).
+// Used so satellite projects' batching / pre-reply delays / model / typing-
+// indicator preferences actually take effect — hub's router was previously the
+// only tunables source which made satellite Tunables UI a no-op for routed JIDs.
+function tunables(forStateDir?: string): Tunables {
   let stored: any = {}
-  try { stored = JSON.parse(readFileSync(TUNABLES_FILE, 'utf8')) } catch {}
+  const file = forStateDir ? join(forStateDir, 'tunables.json') : TUNABLES_FILE
+  try { stored = JSON.parse(readFileSync(file, 'utf8')) } catch {}
   const arr = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
   return {
     collect_window_ms: stored.collect_window_ms ?? Number(process.env.CC_WHATSAPP_COLLECT_WINDOW_MS ?? 60_000),
@@ -620,8 +626,10 @@ async function buildPrompt(evt: any): Promise<{ prompt: string; jid: string; mes
 // to the .send.sock IPC and the running sync executes the presence call. No
 // secondary account needed.
 function startTyping(jid: string, kind: 'text' | 'voice' = 'text'): NodeJS.Timer {
-  // Tunable: respect enable_typing_indicator (per-project toggle).
-  if (!tunables().enable_typing_indicator) return setInterval(() => {}, 60_000)
+  // Tunable: respect enable_typing_indicator from TARGET project (the satellite
+  // that owns this JID), not the hub.
+  const targetDir = resolveTargetProject(jid).stateDir
+  if (!tunables(targetDir).enable_typing_indicator) return setInterval(() => {}, 60_000)
   const args = ['--account', WACLI_ACCOUNT, 'presence', 'typing', '--to', jid]
   if (kind === 'voice') args.push('--media', 'audio')
   const fire = () => spawn(WACLI_BIN, args, { stdio: 'ignore' }).on('error', () => {})
@@ -736,7 +744,8 @@ function enqueueMessage(jid: string, evt: any): void {
   }
 
   p.state = 'COLLECTING'
-  p.timer = setTimeout(() => closeCollectWindow(jid), tunables().collect_window_ms)
+  const targetDir = resolveTargetProject(jid).stateDir
+  p.timer = setTimeout(() => closeCollectWindow(jid), tunables(targetDir).collect_window_ms)
   writeStateSnapshot()
 }
 
@@ -744,7 +753,7 @@ function closeCollectWindow(jid: string): void {
   const p = getPending(jid)
   p.timer = null
   if (p.batch.length === 0) { p.state = 'IDLE'; return }
-  const t = tunables()
+  const t = tunables(resolveTargetProject(jid).stateDir)
   const preDelay = t.pre_reply_min_ms + Math.floor(Math.random() * Math.max(1, t.pre_reply_max_ms - t.pre_reply_min_ms))
   p.state = 'PRE_REPLY'
   trace('collect_closed_pre_reply', { jid, batchSize: p.batch.length, preDelayMs: preDelay })
@@ -800,7 +809,7 @@ async function triggerClaude(jid: string): Promise<void> {
   const targetPersona = loadPersonaFor(target.stateDir)
   writeFileSync(join(turnDir, 'prompt.txt'), prompt)
   writeFileSync(join(turnDir, 'persona.txt'), targetPersona)
-  writeFileSync(join(turnDir, 'batch.json'), JSON.stringify({ jid, project: target.cwd, batchSize: batchSnapshot.length, messages: batchSnapshot, model: tunables().chat_model, started_at: new Date().toISOString() }, null, 2))
+  writeFileSync(join(turnDir, 'batch.json'), JSON.stringify({ jid, project: target.cwd, batchSize: batchSnapshot.length, messages: batchSnapshot, model: tunables(target.stateDir).chat_model, started_at: new Date().toISOString() }, null, 2))
 
   trace('claude_trigger', { jid, project: target.cwd, batchSize: batchSnapshot.length, promptLen: prompt.length, turnId })
   const startMs = Date.now()
@@ -811,7 +820,7 @@ function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startM
   // Session lookup against TARGET project's sessions.json (not hub's)
   const sess = getOrCreateSessionFor(target.stateDir, jid)
   const sessFlag = sess.isNew ? ['--session-id', sess.uuid] : ['--resume', sess.uuid]
-  const t = tunables()
+  const t = tunables(target.stateDir)
 
   // Tool / dir allowlist flags
   const toolFlags: string[] = []
@@ -958,7 +967,8 @@ function onClaudeExit(jid: string): void {
   }
   trace('claude_done_pending_batch', { jid, batchSize: p.batch.length })
   p.state = 'COLLECTING'
-  p.timer = setTimeout(() => closeCollectWindow(jid), tunables().collect_window_ms)
+  const targetDir = resolveTargetProject(jid).stateDir
+  p.timer = setTimeout(() => closeCollectWindow(jid), tunables(targetDir).collect_window_ms)
   writeStateSnapshot()
 }
 
@@ -999,7 +1009,7 @@ async function buildBatchPrompt(jid: string, batch: any[], targetStateDir: strin
       trailer.push(`No contact memory yet for this JID — start a fresh one if the message is substantive.`)
     }
   }
-  const t = tunables()
+  const t = tunables(targetStateDir)
   const quotePct = Math.round(t.quote_reply_probability * 100)
   const maxSeg = t.multi_msg_max_segments
   if (batch.length > 1) {
