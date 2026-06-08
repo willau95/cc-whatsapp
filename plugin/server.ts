@@ -176,10 +176,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   try {
     if (name === 'reply') {
       const jid = String(args.jid)
-      const text = String(args.text ?? '')
+      // Accept `text` (canonical) OR `message` / `content` / `body` (model aliases).
+      // Haiku/Sonnet sometimes invent these despite the schema; without this
+      // alias map the call silently returned "sent 0 message(s)" + is_error=false,
+      // i.e. claude thought it sent but nothing left the machine.
+      const text = String(args.text ?? args.message ?? args.content ?? args.body ?? '')
       const replyTo = args.reply_to ? String(args.reply_to) : undefined
       const files = Array.isArray(args.files) ? (args.files as unknown[]).map(String) : []
       assertAllowed(jid)
+      if (!text && files.length === 0) {
+        // Explicit error so claude retries instead of silently believing it succeeded.
+        return {
+          content: [{ type: 'text', text: `ERROR: reply tool requires non-empty "text" (or alias: message/content/body). Got input keys: ${Object.keys(args).join(',')}` }],
+          isError: true,
+        }
+      }
 
       // Humanlike pre-send delay. Range comes from tunables.json (dashboard-tunable),
       // then scaled UP by text length so longer msgs feel like more typing time.
