@@ -667,6 +667,8 @@ function app() {
       if (id === 'access')   return this.accessIsDirty
       if (id === 'mcp-tools')return this.extraMcpsIsDirty || this.tunablesIsDirty
       if (id === 'claude-native') return this.isCcDirty()
+      if (id === 'chats')    return Object.values(this.memoryV2.dirty || {}).some(v => v)  // contact memory editor
+      if (id === 'playbooks') return this.playbookDirty
       return false
     },
     isCcDirty() {
@@ -1076,9 +1078,16 @@ function app() {
     },
     async openChat(jid) {
       this.activeChat = jid
-      const r = await fetch(`/api/projects/${this.selectedId}/conversations/${encodeURIComponent(jid)}/messages?limit=50`)
-      const data = await r.json()
-      this.chatMessages = data.messages ?? []
+      try {
+        const r = await fetch(`/api/projects/${this.selectedId}/conversations/${encodeURIComponent(jid)}/messages?limit=50`)
+        if (!r.ok) { this.flashToast('Failed to load chat', 'error'); this.chatMessages = []; return }
+        const data = await r.json()
+        this.chatMessages = data.messages ?? []
+      } catch (e) {
+        this.flashToast('Failed to load chat — ' + e, 'error')
+        this.chatMessages = []
+        return
+      }
       this.$nextTick(() => {
         if (this.$refs.chatMessages) this.$refs.chatMessages.scrollTop = this.$refs.chatMessages.scrollHeight
       })

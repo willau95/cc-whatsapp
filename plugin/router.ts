@@ -34,7 +34,6 @@ const STATE_DIR = process.env.CC_WHATSAPP_PROJECT_DIR
 
 const ACCESS_FILE   = join(STATE_DIR, 'access.json')
 const SECRET_FILE   = join(STATE_DIR, '.secret')
-const SESSIONS_FILE = join(STATE_DIR, 'sessions.json')
 const CONFIG_FILE   = join(STATE_DIR, 'config.json')
 const ROUTER_PID    = join(STATE_DIR, 'router.pid')
 const SYNC_PID      = join(STATE_DIR, 'sync.pid')
@@ -55,7 +54,6 @@ const CC_WHATSAPP_BIN = process.env.CC_WHATSAPP_BIN
                          : 'cc-whatsapp')
 const WACLI_BIN = CC_WHATSAPP_BIN  // alias for legacy code paths below
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? 'claude'
-const CHAT_MODEL = process.env.CC_WHATSAPP_CHAT_MODEL ?? 'claude-haiku-4-5-20251001'
 const PORT = Number(process.env.CC_WHATSAPP_PORT ?? 38600)
 const MAX_PROMPT_CHARS = 8_000
 
@@ -343,19 +341,6 @@ function loadExtraMcps(): Record<string, any> {
 // Legacy aliases (referenced elsewhere; resolve fresh each call)
 const DRY_RUN = process.env.CC_WHATSAPP_DRY_RUN === '1'
 
-// ─── persona system prompt (loaded once at startup) ───
-// Composed from agent/IDENTITY.md + SOUL.md + STYLE.md + AGENTS.md + MEMORY.md
-function loadPersonaPrompt(): string {
-  const parts: string[] = []
-  for (const name of ['IDENTITY', 'SOUL', 'STYLE', 'AGENTS', 'MEMORY']) {
-    const path = join(AGENT_DIR, `${name}.md`)
-    try {
-      parts.push(`════════════════════════════════════════\n${name}.md (${path})\n════════════════════════════════════════\n${readFileSync(path, 'utf8').trim()}`)
-    } catch {}
-  }
-  return parts.join('\n\n')
-}
-const PERSONA_PROMPT = loadPersonaPrompt()
 
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 
@@ -456,22 +441,6 @@ last_contact: ${today}
 }
 
 type Sessions = Record<string, string>  // jid → claude session UUID
-function loadSessions(): Sessions {
-  try { return JSON.parse(readFileSync(SESSIONS_FILE, 'utf8')) as Sessions } catch { return {} }
-}
-function saveSessions(s: Sessions): void {
-  const tmp = SESSIONS_FILE + '.tmp'
-  writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n', { mode: 0o600 })
-  renameSync(tmp, SESSIONS_FILE)
-}
-function getOrCreateSession(jid: string): { uuid: string; isNew: boolean } {
-  const s = loadSessions()
-  if (s[jid]) return { uuid: s[jid], isNew: false }
-  const uuid = randomUUID()
-  s[jid] = uuid
-  saveSessions(s)
-  return { uuid, isNew: true }
-}
 
 // Strip characters that could break the <whatsapp> tag boundary so a sender
 // cannot inject context that looks like further system instructions.
@@ -650,58 +619,6 @@ function startTyping(jid: string, kind: 'text' | 'voice' = 'text'): NodeJS.Timer
 }
 function stopTyping(jid: string): void {
   spawn(WACLI_BIN, ['--account', WACLI_ACCOUNT, 'presence', 'paused', '--to', jid], { stdio: 'ignore' }).on('error', () => {})
-}
-
-// Build MCP_JSON dynamically each turn so extra_mcps.json edits go live.
-function buildMcpJson(): string {
-  const base: Record<string, any> = {
-    whatsapp: {
-      command: 'bun',
-      args: [SERVER_FILE],
-    },
-  }
-  const extras = loadExtraMcps()
-  // user-defined MCPs cannot override our whatsapp server
-  const { whatsapp: _ignore, ...userExtras } = extras
-  return JSON.stringify({ mcpServers: { ...base, ...userExtras } })
-}
-
-// Spawn `claude -p` to handle one inbound message. Fires WhatsApp typing
-// indicator continuously while claude works, stops on exit.
-function spawnClaude(jid: string, prompt: string, onExit?: () => void): void {
-  const sess = getOrCreateSession(jid)
-  const sessFlag = sess.isNew ? ['--session-id', sess.uuid] : ['--resume', sess.uuid]
-  const args = [
-    '-p',
-    '--model', tunables().chat_model,
-    '--mcp-config', MCP_JSON,
-    '--dangerously-skip-permissions',
-    '--strict-mcp-config',
-    '--append-system-prompt', PERSONA_PROMPT,
-    ...sessFlag,
-    prompt,
-  ]
-  trace('claude_spawn', { jid, sessId: sess.uuid, sessNew: sess.isNew, model: CHAT_MODEL, promptLen: prompt.length })
-
-  const heartbeat = startTyping(jid)
-
-  const child = spawn(CLAUDE_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] })
-  let stdoutBuf = ''
-  let stderrBuf = ''
-  child.stdout.on('data', d => { stdoutBuf += d.toString() })
-  child.stderr.on('data', d => { stderrBuf += d.toString() })
-  child.on('exit', code => {
-    clearInterval(heartbeat)
-    stopTyping(jid)
-    trace('claude_exit', { jid, code, durationMs: undefined, stdoutTail: stdoutBuf.slice(-200), stderrTail: stderrBuf.slice(-300) })
-    onExit?.()
-  })
-  child.on('error', err => {
-    clearInterval(heartbeat)
-    stopTyping(jid)
-    trace('claude_error', { jid, err: String(err) })
-    onExit?.()
-  })
 }
 
 // ─────────── humanlike batching state machine (per JID) ───────────
