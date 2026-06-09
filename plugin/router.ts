@@ -877,6 +877,7 @@ function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startM
       ...process.env,
       CC_WHATSAPP_PROJECT_DIR: target.stateDir,
       CC_WHATSAPP_ALLOWED_JIDS: jid,   // hard isolation: claude can only reply to this JID
+      CC_WHATSAPP_TURN_DIR: join(targetTurnsDir, turnId),  // MCP server logs each sent reply here
     },
   })
   if (child.pid) ourClaudePids.add(child.pid)
@@ -889,14 +890,28 @@ function spawnClaudeWithTurn(jid: string, prompt: string, turnId: string, startM
     clearInterval(heartbeat)
     stopTyping(jid)
     const durationMs = Date.now() - startMs
+    // Did this turn actually SEND anything to the user? The MCP server appends
+    // one line to replies.log per successful reply. A turn that exits cleanly
+    // but sent zero replies = claude wrote its answer as final text and forgot
+    // to call the reply tool → the user got SILENCE. Surface it loudly so it's
+    // visible in the dashboard instead of looking like a normal completed turn.
+    let replyCount = 0
+    try {
+      const rl = readFileSync(join(targetTurnsDir, turnId, 'replies.log'), 'utf8')
+      replyCount = rl.split('\n').filter(l => l.trim()).length
+    } catch {}
     try {
       writeFileSync(join(targetTurnsDir, turnId, 'stdout.txt'), stdoutBuf)
       writeFileSync(join(targetTurnsDir, turnId, 'stderr.txt'), stderrBuf)
       writeFileSync(join(targetTurnsDir, turnId, 'exit.json'), JSON.stringify({
-        jid, code, durationMs, ended_at: new Date().toISOString(),
+        jid, code, durationMs, replyCount, ended_at: new Date().toISOString(),
       }, null, 2))
     } catch {}
-    trace('claude_exit', { jid, code, durationMs, stdoutTail: stdoutBuf.slice(-200), stderrTail: stderrBuf.slice(-300), turnId })
+    trace('claude_exit', { jid, code, durationMs, replyCount, stdoutTail: stdoutBuf.slice(-200), stderrTail: stderrBuf.slice(-300), turnId })
+    if (code === 0 && replyCount === 0) {
+      trace('claude_no_reply_warning', { jid, turnId, stdoutTail: stdoutBuf.slice(-300),
+        hint: 'turn exited cleanly but called the reply tool 0 times — user received nothing' })
+    }
     onExit()
   })
   child.on('error', err => {

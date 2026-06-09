@@ -19,7 +19,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { spawnSync } from 'child_process'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync, appendFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -88,6 +88,18 @@ function wacli(args: string[]): string {
     throw new Error(`cc-whatsapp ${args[0]} ${args[1]} failed (exit ${r.status}): ${(r.stderr || r.stdout || '').trim()}`)
   }
   return r.stdout ?? ''
+}
+
+// Append one line per delivered reply to the current turn's replies.log. The
+// router (which set CC_WHATSAPP_TURN_DIR) reads this on claude exit to detect
+// turns that completed without ever sending anything to the user.
+function recordReply(jid: string, messageIds: string[]): void {
+  const turnDir = process.env.CC_WHATSAPP_TURN_DIR
+  if (!turnDir) return
+  try {
+    appendFileSync(join(turnDir, 'replies.log'),
+      `${new Date().toISOString()} ${jid} ${messageIds.join(',')}\n`)
+  } catch {}
 }
 
 function extractMessageId(jsonOut: string): string {
@@ -219,6 +231,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       for (const f of files) {
         sent.push(extractMessageId(wacli(['send', 'file', '--to', jid, '--file', f, '--json'])))
       }
+      // Record that this turn actually delivered something to the user. The
+      // router reads turns/<id>/replies.log on claude exit to detect the
+      // "wrote text but never called reply" silent-failure mode.
+      if (sent.length > 0) recordReply(jid, sent)
       return { content: [{ type: 'text', text: `sent ${sent.length} message(s): ${sent.join(', ')} (after ${delay}ms humanlike delay)` }] }
     }
 
