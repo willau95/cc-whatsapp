@@ -182,6 +182,18 @@ function resolveTargetProject(jid: string): { stateDir: string; cwd: string; acc
   return { stateDir: STATE_DIR, cwd: HUB_PROJECT_PATH, account: WACLI_ACCOUNT, resolvedBy: 'hub_fallback' }
 }
 
+// JID validation. JIDs arrive in webhooks (untrusted) and become filesystem
+// path components (contacts/<jid>/, sessions, etc). A malformed JID with `/`
+// or a leading dot could traverse out of the contacts dir. Legit WhatsApp JIDs
+// look like `1234@s.whatsapp.net`, `1234-5678@g.us`, `120363…@g.us`,
+// `12345@lid`, `12345:71@lid`, `status@broadcast`. Require: first char
+// alphanumeric (blocks leading-dot / `..`), charset has no `/` (blocks
+// traversal), no null bytes, bounded length.
+const JID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/
+function isValidJid(jid: unknown): jid is string {
+  return typeof jid === 'string' && JID_RE.test(jid)
+}
+
 // ─── Contact memory v2 ─────────────────────────────────────────────────────
 // Per-contact memory used to be ONE flat .md. Now it's a directory with a
 // small always-loaded card.md + on-demand subfiles. Backward-compatible: if
@@ -1076,6 +1088,13 @@ const server = (globalThis as any).Bun.serve({
       trace('webhook_received', { chat: evt.Chat, from_me: evt.FromMe, text_preview: (evt.Text ?? '').slice(0, 80), keys: Object.keys(evt ?? {}) })
       if (!isProbablyText) {
         trace('webhook_raw_body', body.slice(0, 2000))
+      }
+
+      // Reject malformed JIDs before they become filesystem paths (defense in
+      // depth — a JID with `/` or a leading dot could escape the contacts dir).
+      if (!isValidJid(evt.Chat)) {
+        trace('drop_invalid_jid', { chat: String(evt.Chat).slice(0, 60) })
+        return new Response('ok')
       }
 
       // ── DISPATCHER: figure out target project for this JID ─────────

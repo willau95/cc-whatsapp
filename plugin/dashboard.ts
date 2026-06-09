@@ -238,6 +238,14 @@ function safeJoinUnderCwd(base: string, sub: string): string {
 const SAFE_SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/
 function isSafeSlug(s: string): boolean { return SAFE_SLUG_RE.test(s) }
 
+// JID validation for endpoints that turn a (URL-decoded) JID into a filesystem
+// path component (contacts/<jid>/...). Same shape as the router's check: first
+// char alphanumeric (blocks leading-dot/`..`), no `/` (blocks traversal).
+const JID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/
+function isValidJid(jid: unknown): jid is string {
+  return typeof jid === 'string' && JID_RE.test(jid)
+}
+
 // Parse a single YAML frontmatter field from a markdown file. Returns
 // null if no frontmatter or field not present. Tolerates quotes, no value
 // folding, no nested structures — claude code's agents/skills frontmatter
@@ -2110,6 +2118,7 @@ return POSIX path of f`
       const contactRead = sub.match(/^\/contacts\/([^/]+)$/)
       if (contactRead && req.method === 'GET') {
         const jid = decodeURIComponent(contactRead[1])
+        if (!isValidJid(jid)) return json({ ok: false, err: 'invalid jid' }, 400)
         try { return json({ jid, content: readFileSync(join(stateDir, 'agent', 'contacts', `${jid}.md`), 'utf8') }) }
         catch {
           // Return empty so user can start writing
@@ -2118,6 +2127,7 @@ return POSIX path of f`
       }
       if (contactRead && req.method === 'PUT') {
         const jid = decodeURIComponent(contactRead[1])
+        if (!isValidJid(jid)) return json({ ok: false, err: 'invalid jid' }, 400)
         const body = await req.text()
         writeFileAtomic(join(stateDir, 'agent', 'contacts', `${jid}.md`), body)
         return json({ ok: true })
@@ -2233,11 +2243,13 @@ return POSIX path of f`
       const contactV2Read = sub.match(/^\/contacts-v2\/([^/]+)$/)
       if (contactV2Read && req.method === 'GET') {
         const jid = decodeURIComponent(contactV2Read[1]!)
+        if (!isValidJid(jid)) return json({ ok: false, err: 'invalid jid' }, 400)
         return json({ jid, ...readContactV2(id, jid) })
       }
       const contactV2Write = sub.match(/^\/contacts-v2\/([^/]+)\/([a-z]+)$/)
       if (contactV2Write && req.method === 'PUT') {
         const jid = decodeURIComponent(contactV2Write[1]!)
+        if (!isValidJid(jid)) return json({ ok: false, err: 'invalid jid' }, 400)
         const subfile = contactV2Write[2]!
         const body = await req.text()
         const result = writeContactV2Subfile(id, jid, subfile, body)
