@@ -505,7 +505,7 @@ async function findMediaFile(fileLength: number, sha256Base64: string, maxWaitMs
   return null
 }
 
-async function buildPrompt(evt: any): Promise<{ prompt: string; jid: string; message_id: string } | null> {
+async function buildPrompt(evt: any, maxChars: number = MAX_PROMPT_CHARS): Promise<{ prompt: string; jid: string; message_id: string } | null> {
   if (!evt || typeof evt !== 'object') return null
   if (evt.FromMe === true || evt.Revoked === true) return null
   const jid: string | undefined = evt.Chat
@@ -562,7 +562,7 @@ async function buildPrompt(evt: any): Promise<{ prompt: string; jid: string; mes
       body = `[${k} attached${cap} at ${localPath}]`
     }
   } else if (text) {
-    body = text.length > MAX_PROMPT_CHARS ? text.slice(0, MAX_PROMPT_CHARS) + ' …[truncated]' : text
+    body = text.length > maxChars ? text.slice(0, maxChars) + ' …[truncated]' : text
   } else {
     return null
   }
@@ -642,6 +642,12 @@ type Pending = {
 }
 const pending = new Map<string, Pending>()
 
+// Per-JID count of consecutive session-in-use defers (owner-JID terminal
+// sharing). Capped by MAX_SESSION_DEFERS so a permanently-busy terminal
+// session can't defer a WhatsApp reply forever. ~5min at 30s/retry.
+const deferCounts = new Map<string, number>()
+const MAX_SESSION_DEFERS = 10
+
 function getPending(jid: string): Pending {
   let p = pending.get(jid)
   if (!p) {
@@ -703,12 +709,24 @@ async function triggerClaude(jid: string): Promise<void> {
     const target = resolveTargetProject(jid)
     const sess = getOrCreateSessionFor(target.stateDir, jid)
     if (isSessionInUseByExternal(sess.uuid, target.cwd)) {
-      trace('claude_deferred_session_in_use', { jid, uuid: sess.uuid, retry_in_s: 30, reason: 'terminal claude actively writing jsonl' })
-      writeStateSnapshot()
-      p.timer = setTimeout(() => triggerClaude(jid), 30_000)
-      return
+      // Defer so we don't interleave jsonl appends with the terminal claude.
+      // But CAP the retries — if the terminal session sits open-and-active
+      // indefinitely (a long-running loop, or the user walked away mid-task),
+      // an uncapped 30s retry would defer the WhatsApp reply FOREVER and the
+      // pending batch would grow unbounded. After MAX_SESSION_DEFERS (~5min)
+      // give up waiting and process anyway.
+      const dc = (deferCounts.get(jid) ?? 0) + 1
+      if (dc <= MAX_SESSION_DEFERS) {
+        deferCounts.set(jid, dc)
+        trace('claude_deferred_session_in_use', { jid, uuid: sess.uuid, retry_in_s: 30, attempt: dc, max: MAX_SESSION_DEFERS, reason: 'terminal claude actively writing jsonl' })
+        writeStateSnapshot()
+        p.timer = setTimeout(() => triggerClaude(jid), 30_000)
+        return
+      }
+      trace('claude_defer_giveup', { jid, uuid: sess.uuid, attempts: dc, reason: 'terminal session stayed busy past cap — processing anyway' })
     }
   }
+  deferCounts.delete(jid)
 
   p.state = 'CLAUDE_RUNNING'
   const batchSnapshot = p.batch.slice()
@@ -920,9 +938,10 @@ function onClaudeExit(jid: string): void {
 // appends one batch-level instruction block (contact memory + multi-msg
 // guidance + quote-reply guidance).
 async function buildBatchPrompt(jid: string, batch: any[], targetStateDir: string = STATE_DIR): Promise<string | null> {
+  const maxChars = tunables(targetStateDir).max_prompt_chars
   const fragments: string[] = []
   for (const evt of batch) {
-    const mapped = await buildPrompt(evt)
+    const mapped = await buildPrompt(evt, maxChars)
     if (!mapped) continue
     const m = mapped.prompt.match(/<whatsapp [^>]*>[\s\S]*?<\/whatsapp>/)
     if (m) fragments.push(m[0])
