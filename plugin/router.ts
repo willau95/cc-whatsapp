@@ -1194,8 +1194,32 @@ const SYNC_RESTART_MAX_MS = 60_000      // cap backoff at 60s
 let syncRestartTimer: ReturnType<typeof setTimeout> | null = null
 let syncSpawnedAt = 0
 
+// If a previous router crashed hard (segfault / OOM / kill -9), its wacli
+// child is orphaned and keeps holding the account's store lock — the new
+// wacli then loops on "store is locked" forever. Reclaim it: read the LOCK
+// file, and if it points to a live cc-whatsapp wacli for THIS account that
+// isn't our current child, kill it. The `ps` command-line check guards
+// against killing an unrelated process that recycled the pid.
+const WACLI_LOCK_FILE = join(homedir(), '.wacli', 'accounts', WACLI_ACCOUNT, 'LOCK')
+function reclaimStaleLock(): void {
+  try {
+    const raw = readFileSync(WACLI_LOCK_FILE, 'utf8')
+    const m = raw.match(/pid=(\d+)/)
+    if (!m) return
+    const pid = parseInt(m[1]!, 10)
+    if (!pid || pid === syncProc?.pid) return
+    try { process.kill(pid, 0) } catch { return }  // holder already dead — nothing to reclaim
+    const r = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' })
+    const cmd = (r.stdout || '').trim()
+    if (!cmd.includes('--account') || !cmd.includes(WACLI_ACCOUNT) || !cmd.includes('sync')) return
+    trace('wacli_reclaim_stale_lock', { orphanPid: pid, cmd: cmd.slice(0, 140) })
+    try { process.kill(pid, 9) } catch {}
+  } catch {}
+}
+
 function startSync(): void {
   if (shuttingDown) return
+  reclaimStaleLock()
   syncSpawnedAt = Date.now()
   const proc = spawn(
     WACLI_BIN,

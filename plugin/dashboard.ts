@@ -1078,6 +1078,12 @@ async function startRouter(id: string): Promise<{ ok: boolean; pid?: number; err
   try { errOutput = readFileSync(errLog, 'utf8').slice(-1000) } catch {}
 
   if (actualPid && isPidAlive(actualPid)) {
+    // Mark desired-running so the supervisor restarts it after a reboot or crash.
+    try {
+      const cfgPath = join(stateDir, 'config.json')
+      const c = readJsonSafe(cfgPath) ?? {}
+      if (!c.autostart) { c.autostart = true; writeJsonAtomic(cfgPath, c) }
+    } catch {}
     return { ok: true, pid: actualPid, trace_tail: traceTail }
   }
 
@@ -1174,6 +1180,13 @@ exec claude --plugin-dir ${JSON.stringify(PLUGIN_ROOT)} --dangerously-skip-permi
 
 function stopRouter(id: string): { ok: boolean; err?: string } {
   const stateDir = getStateDir(id)
+  // Clear desired-running first so the supervisor doesn't immediately restart
+  // the router we're about to kill.
+  try {
+    const cfgPath = join(stateDir, 'config.json')
+    const c = readJsonSafe(cfgPath) ?? {}
+    if (c.autostart) { c.autostart = false; writeJsonAtomic(cfgPath, c) }
+  } catch {}
   const routerPid = readPidSafe(join(stateDir, 'router.pid'))
   const syncPid = readPidSafe(join(stateDir, 'sync.pid'))
   let killed = 0
@@ -1184,6 +1197,38 @@ function stopRouter(id: string): { ok: boolean; err?: string } {
   }
   if (killed === 0) return { ok: false, err: 'no live router/sync to stop' }
   return { ok: true }
+}
+
+// ─── Router supervisor: restart desired-but-dead routers ────────────────────
+// Routers are started on demand and previously did not survive a reboot or a
+// crash. With config.autostart marking which routers SHOULD be running, the
+// supervisor (run at dashboard boot + every 60s) restarts any that died.
+// Combined with the in-router wacli self-heal (router.ts), this gives full
+// process-supervision: dashboard auto-starts via LaunchAgent → supervisor
+// restores routers → each router keeps its wacli sidecar alive.
+let supervising = false
+async function superviseRouters(): Promise<void> {
+  if (supervising) return
+  supervising = true
+  try {
+    for (const p of discoverProjects()) {
+      let cfg: any = {}
+      try { cfg = readJsonSafe(join(getStateDir(p.id), 'config.json')) ?? {} } catch {}
+      if (!cfg.autostart) continue
+      const routerPid = readPidSafe(join(getStateDir(p.id), 'router.pid'))
+      if (routerPid && isPidAlive(routerPid)) continue   // already running
+      if (!isAccountPaired(cfg.account)) continue          // can't run unpaired
+      process.stderr.write(`[supervisor] restarting desired router for ${p.path}\n`)
+      try {
+        const r = await startRouter(p.id)
+        process.stderr.write(`[supervisor] ${p.path}: ${r.ok ? 'started pid ' + r.pid : 'failed — ' + r.err}\n`)
+      } catch (e) {
+        process.stderr.write(`[supervisor] ${p.path}: exception ${e}\n`)
+      }
+    }
+  } finally {
+    supervising = false
+  }
 }
 
 // ─── Pairing flow (cc-whatsapp accounts add + SSE stream) ──────────────────
@@ -2306,6 +2351,13 @@ function serveStatic(name: string, mime: string): Response {
 }
 
 startTraceWatchers()
+
+// Router supervision: restore desired-running routers on boot (after a reboot
+// the LaunchAgent starts the dashboard, which then restarts the routers that
+// were running before), then re-check every 60s to recover from crashes.
+// Initial sweep is delayed 3s so the HTTP server is fully up first.
+setTimeout(() => { superviseRouters() }, 3_000)
+setInterval(() => { superviseRouters() }, 60_000)
 
 process.stderr.write(`\n✓ cc-whatsapp dashboard on http://127.0.0.1:${PORT}\n`)
 process.stderr.write(`  open in browser, manage all your bots\n\n`)
