@@ -38,8 +38,8 @@
   </div>
 
   <div x-show="selected" class="flex items-center gap-2 text-xs">
-    <span :class="selected?.routerAlive ? 'text-emerald-400' : 'text-zinc-500'">●</span>
-    <span x-text="selected?.routerAlive ? 'router online' : (selected?.paired ? 'router stopped' : 'not paired')"></span>
+    <span :class="routerStatusColor(selected)">●</span>
+    <span x-text="routerStatusLabel(selected)"></span>
   </div>
 
   <div class="flex-1"></div>

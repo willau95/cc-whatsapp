@@ -1679,6 +1679,34 @@ function app() {
       return hub?.routerAlive ?? false
     },
 
+    // Is WhatsApp actually connected for this project's router? The router
+    // process being alive (routerAlive) is NOT the same as the wacli sidecar
+    // being connected to WhatsApp — wacli can die or sit disconnected while
+    // the router stays up. Treat WhatsApp as connected only when the wacli
+    // process is alive AND it reported a recent "Connected." (within ~3min).
+    waConnected(p) {
+      if (!p || !p.routerAlive) return false
+      if (p.syncAlive === false) return false
+      const h = p.health
+      if (!h) return p.syncAlive !== false  // no health yet — trust syncAlive
+      if (h.wacli_alive === false) return false
+      if (h.last_connected_at) {
+        const age = Date.now() - new Date(h.last_connected_at).getTime()
+        if (age > 180_000) return false  // stale: no Connected. in 3min
+      }
+      return true
+    },
+    routerStatusColor(p) {
+      if (!p?.routerAlive) return 'text-zinc-500'
+      if (!this.waConnected(p)) return 'text-amber-400'  // up but WhatsApp down
+      return 'text-emerald-400'
+    },
+    routerStatusLabel(p) {
+      if (!p?.routerAlive) return p?.paired ? 'router stopped' : 'not paired'
+      if (!this.waConnected(p)) return 'router up · WhatsApp reconnecting…'
+      return 'router online'
+    },
+
     // ─── helpers ───
     stateClass(state) {
       return {

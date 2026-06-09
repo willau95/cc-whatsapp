@@ -1135,20 +1135,17 @@ const server = (globalThis as any).Bun.serve({
   },
 })
 
-// ─────────── wacli sync sidecar ───────────
-
-const syncProc = spawn(
-  WACLI_BIN,
-  [
-    '--account', WACLI_ACCOUNT,  // project-specific wacli account
-    'sync', '--follow',
-    '--download-media',  // sync owns the store lock; auto-download media so we never need a second wacli process
-    '--webhook', `http://127.0.0.1:${PORT}/in`,
-    '--webhook-secret', SECRET,
-  ],
-  { stdio: ['ignore', 'pipe', 'pipe'] },
-)
-writeFileSync(SYNC_PID, String(syncProc.pid))
+// ─────────── wacli sync sidecar (self-healing) ───────────
+//
+// CRITICAL FIX: wacli `sync --follow` exits permanently after its own
+// --max-reconnect window (default 5m) elapses on a sustained disconnect, e.g.
+// WhatsApp replacing the linked-device socket, or a >5m network outage. The
+// router process itself keeps running, the webhook listener stays up, but NO
+// messages arrive — a silent outage that previously required a human to notice
+// "the bot stopped replying" and manually restart. This caused 3 production
+// outages. We now supervise the sidecar: respawn on unexpected exit with
+// exponential backoff, and surface wacli liveness in health.json so the
+// dashboard can show "router up but WhatsApp disconnected".
 
 // Track wacli connection health. WhatsApp's MD protocol allows only ONE
 // active websocket per linked-device — if WhatsApp Desktop / Web is running
@@ -1156,6 +1153,9 @@ writeFileSync(SYNC_PID, String(syncProc.pid))
 // Disconnect/Reconnect loop. Detect that and surface to dashboard.
 const disconnectTimes: number[] = []
 let lastConnectedAt = ''
+let wacliAlive = false
+let lastWacliExitAt = ''
+let lastWacliExitCode: number | null = null
 function writeHealth(unstable: boolean): void {
   try {
     writeFileSync(HEALTH_SNAP, JSON.stringify({
@@ -1164,32 +1164,91 @@ function writeHealth(unstable: boolean): void {
       last_connected_at: lastConnectedAt,
       last_disconnect_at: disconnectTimes.length ? new Date(disconnectTimes[disconnectTimes.length - 1]!).toISOString() : '',
       account: WACLI_ACCOUNT,
+      // wacli liveness (added with the self-healing supervisor)
+      wacli_alive: wacliAlive,
+      last_wacli_exit_at: lastWacliExitAt,
+      last_wacli_exit_code: lastWacliExitCode,
     }, null, 2))
   } catch {}
 }
-writeHealth(false)
 
-syncProc.stderr.on('data', d => {
-  const txt = d.toString()
-  const now = Date.now()
-  if (txt.includes('Disconnected')) {
-    disconnectTimes.push(now)
-    while (disconnectTimes.length && now - disconnectTimes[0]! > 60_000) disconnectTimes.shift()
-    if (disconnectTimes.length > 10) writeHealth(true)
-  } else if (txt.includes('Connected.')) {
-    lastConnectedAt = new Date(now).toISOString()
-    disconnectTimes.length = 0
+let syncProc: ReturnType<typeof spawn> | null = null
+let shuttingDown = false
+let syncRestartDelayMs = 2_000          // grows on repeated quick failures
+const SYNC_RESTART_MAX_MS = 60_000      // cap backoff at 60s
+let syncRestartTimer: ReturnType<typeof setTimeout> | null = null
+let syncSpawnedAt = 0
+
+function startSync(): void {
+  if (shuttingDown) return
+  syncSpawnedAt = Date.now()
+  const proc = spawn(
+    WACLI_BIN,
+    [
+      '--account', WACLI_ACCOUNT,  // project-specific wacli account
+      'sync', '--follow',
+      '--download-media',  // sync owns the store lock; auto-download media so we never need a second wacli process
+      '--webhook', `http://127.0.0.1:${PORT}/in`,
+      '--webhook-secret', SECRET,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  )
+  syncProc = proc
+  wacliAlive = true
+  try { writeFileSync(SYNC_PID, String(proc.pid)) } catch {}
+  writeHealth(false)
+
+  proc.stderr?.on('data', d => {
+    const txt = d.toString()
+    const now = Date.now()
+    if (txt.includes('Disconnected')) {
+      disconnectTimes.push(now)
+      while (disconnectTimes.length && now - disconnectTimes[0]! > 60_000) disconnectTimes.shift()
+      if (disconnectTimes.length > 10) writeHealth(true)
+    } else if (txt.includes('Connected.')) {
+      lastConnectedAt = new Date(now).toISOString()
+      disconnectTimes.length = 0
+      // Sidecar has been healthy for a real connection — reset the backoff so
+      // a future failure starts from a short delay again.
+      syncRestartDelayMs = 2_000
+      writeHealth(false)
+    }
+    trace('wacli_stderr', txt.trim().slice(0, 300))
+  })
+
+  proc.on('exit', code => {
+    wacliAlive = false
+    lastWacliExitAt = new Date().toISOString()
+    lastWacliExitCode = code
+    trace('wacli_exit', { code })
     writeHealth(false)
-  }
-  trace('wacli_stderr', txt.trim().slice(0, 300))
-})
-syncProc.on('exit', code => trace('wacli_exit', { code }))
+    if (shuttingDown) return
+    // If wacli ran healthily for a while before dying, restart promptly;
+    // if it died almost immediately (e.g. store-locked, bad auth), back off
+    // harder so we don't hot-loop.
+    const ranMs = Date.now() - syncSpawnedAt
+    if (ranMs > 30_000) syncRestartDelayMs = 2_000
+    const delay = syncRestartDelayMs
+    syncRestartDelayMs = Math.min(syncRestartDelayMs * 2, SYNC_RESTART_MAX_MS)
+    trace('wacli_respawn_scheduled', { inMs: delay, lastCode: code, ranMs })
+    if (syncRestartTimer) clearTimeout(syncRestartTimer)
+    syncRestartTimer = setTimeout(() => { syncRestartTimer = null; startSync() }, delay)
+  })
+
+  proc.on('error', err => {
+    trace('wacli_spawn_error', String(err))
+  })
+}
+
+startSync()
 
 // ─────────── lifecycle ───────────
 
 function shutdown(reason: string): void {
+  shuttingDown = true
   trace('shutdown', { reason })
-  try { syncProc.kill('SIGTERM') } catch {}
+  if (syncRestartTimer) { clearTimeout(syncRestartTimer); syncRestartTimer = null }
+  try { syncProc?.kill('SIGTERM') } catch {}
   process.exit(0)
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'))

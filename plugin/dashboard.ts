@@ -89,6 +89,9 @@ type Project = {
     disconnects_60s: number
     last_disconnect_at?: string
     last_connected_at?: string
+    wacli_alive?: boolean
+    last_wacli_exit_at?: string
+    last_wacli_exit_code?: number | null
   }
 }
 
