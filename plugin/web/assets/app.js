@@ -456,6 +456,13 @@ function app() {
       this.flashToast('Binding saved — next message routes there')
       await this.loadAccounts()
     },
+    async dismissUnboundJid(hubProjectId, jid) {
+      const r = await fetch(`/api/projects/${hubProjectId}/recent-jids/${encodeURIComponent(jid)}/dismiss`, { method: 'POST' })
+      const d = await r.json()
+      if (!d.ok) { this.flashToast('Dismiss failed: ' + (d.err ?? 'unknown'), 'error'); return }
+      this.flashToast('Dismissed')
+      await this.loadAccounts()
+    },
 
     async refresh() {
       try {

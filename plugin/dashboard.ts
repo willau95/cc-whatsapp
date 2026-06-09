@@ -694,19 +694,34 @@ function recentUnboundJids(projectId: string, limit = 50): Array<{ jid: string; 
     lines = content.trimEnd().split('\n').slice(-2000)
   } catch { return [] }
 
-  const dispatcher = readDispatcher(projectId)
-  const bound = new Set(Object.keys(dispatcher.bindings))
+  const projectCfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
+  const acctName = projectCfg.account ?? 'main'
+
+  // A JID is "bound" if ANY project on this account routes it. The hub holds
+  // the bindings; satellites have none. Without unioning across the account, a
+  // satellite (e.g. the old hub after a hub-swap) falsely surfaces groups the
+  // account's current hub already routes — showing "needs binding" for a JID
+  // that's actually handled.
+  const bound = new Set<string>()
+  for (const sp of discoverProjects()) {
+    if (sp.account !== acctName) continue
+    const d = readDispatcher(sp.id)
+    for (const k of Object.keys(d.bindings ?? {})) bound.add(k)
+  }
   const access = readJsonSafe(join(stateDir, 'access.json')) ?? { allowFrom: [] }
   const allowFrom = new Set<string>(access.allowFrom ?? [])
 
   // Owner-personal chats (JIDs where the owner sent first) — never surface.
   // Stored at ACCOUNT-LEVEL: ~/.cc-whatsapp/accounts/<account>/owner_personal_chats.json
   // so any project on the account shares the same blacklist.
-  const projectCfg = readJsonSafe(join(stateDir, 'config.json')) ?? {}
-  const acctName = projectCfg.account ?? 'main'
   const ownerPersonalFile = join(homedir(), '.cc-whatsapp', 'accounts', acctName, 'owner_personal_chats.json')
   let ownerPersonal: Set<string>
   try { ownerPersonal = new Set(JSON.parse(readFileSync(ownerPersonalFile, 'utf8'))) } catch { ownerPersonal = new Set() }
+
+  // Dismissed unbound-senders — the user clicked "dismiss" so we stop nagging.
+  // Account-level, same as owner_personal_chats. This is the only way to clear
+  // an alert derived from trace.log history (which persists until it ages out).
+  const dismissed = loadDismissedUnbound(acctName)
 
   // How many distinct projects share this account? If only one (SOLO), groups
   // don't need bindings either — everything just goes to the hub naturally.
@@ -760,13 +775,33 @@ function recentUnboundJids(projectId: string, limit = 50): Array<{ jid: string; 
     }
   }
 
-  // Final filter: also remove any JID that's now in allowFrom (auto-onboarded after the drop)
+  // Final filter: also remove any JID that's now in allowFrom (auto-onboarded
+  // after the drop) or that the user explicitly dismissed.
   const out: any[] = []
   for (const [jid, info] of candidates) {
+    if (dismissed.has(jid)) continue
     if (allowFrom.has(jid) && info.reason !== 'group seen — optionally bind to a specific project') continue
     out.push({ jid, ...info })
   }
   return out.sort((a, b) => b.lastSeen.localeCompare(a.lastSeen)).slice(0, limit)
+}
+
+// Dismissed unbound-senders, account-level. Lets the user clear a binding alert
+// that would otherwise persist as long as the JID stays in recent trace.log.
+function dismissedUnboundFile(account: string): string {
+  return join(homedir(), '.cc-whatsapp', 'accounts', account, 'dismissed_unbound.json')
+}
+function loadDismissedUnbound(account: string): Set<string> {
+  try { return new Set(JSON.parse(readFileSync(dismissedUnboundFile(account), 'utf8'))) }
+  catch { return new Set() }
+}
+function dismissUnboundJid(account: string, jid: string): void {
+  const s = loadDismissedUnbound(account)
+  if (s.has(jid)) return
+  s.add(jid)
+  const f = dismissedUnboundFile(account)
+  mkdirSync(dirname(f), { recursive: true, mode: 0o700 })
+  writeFileSync(f, JSON.stringify(Array.from(s).sort(), null, 2))
 }
 
 // ─── Persona templates ─────────────────────────────────────────────────────
@@ -2237,6 +2272,14 @@ return POSIX path of f`
       }
       if (sub === '/recent-jids' && req.method === 'GET') {
         return json(recentUnboundJids(id))
+      }
+      const dismissJid = sub.match(/^\/recent-jids\/([^/]+)\/dismiss$/)
+      if (dismissJid && req.method === 'POST') {
+        const jid = decodeURIComponent(dismissJid[1]!)
+        if (!isValidJid(jid)) return json({ ok: false, err: 'invalid jid' }, 400)
+        const account = readJsonSafe(join(stateDir, 'config.json'))?.account ?? 'main'
+        dismissUnboundJid(account, jid)
+        return json({ ok: true })
       }
 
       // ─── MEMORY v2 (per-contact subfiles) ───
