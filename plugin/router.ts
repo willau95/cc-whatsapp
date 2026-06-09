@@ -1214,6 +1214,10 @@ function startSync(): void {
     wacliAlive = false
     lastWacliExitAt = new Date().toISOString()
     lastWacliExitCode = code
+    // Clear lastConnectedAt so the UI shows "reconnecting" until the respawned
+    // wacli emits a fresh "Connected." — a stable wacli only emits Connected
+    // once, so we treat "connected" as a latched state, not a recent event.
+    lastConnectedAt = ''
     trace('wacli_exit', { code })
     writeHealth(false)
     if (shuttingDown) return

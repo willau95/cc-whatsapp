@@ -1706,9 +1706,14 @@ function app() {
       const h = p.health
       if (!h) return p.syncAlive !== false  // no health yet — trust syncAlive
       if (h.wacli_alive === false) return false
-      if (h.last_connected_at) {
-        const age = Date.now() - new Date(h.last_connected_at).getTime()
-        if (age > 180_000) return false  // stale: no Connected. in 3min
+      // "Connected" is a LATCHED state: wacli emits "Connected." once and stays
+      // silent while healthy, so we must NOT treat an old last_connected_at as
+      // stale. Connected iff we've seen a connect AND there's no disconnect more
+      // recent than it. (router.ts clears last_connected_at on wacli exit.)
+      if (!h.last_connected_at) return false           // not connected yet (or just died)
+      if (h.last_disconnect_at &&
+          new Date(h.last_disconnect_at).getTime() > new Date(h.last_connected_at).getTime()) {
+        return false                                    // most recent event was a disconnect
       }
       return true
     },
