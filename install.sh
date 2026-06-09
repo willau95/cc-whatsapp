@@ -29,6 +29,11 @@ REPO_DIR="${CC_HOME}/repo"
 BIN_DIR="${REPO_DIR}/bin"
 BIN_PATH="${BIN_DIR}/cc-whatsapp"
 RELEASE_TAG="v0.2.0"
+# SHA256 of the release binary, pinned here. install.sh is fetched over HTTPS
+# from raw.githubusercontent while the binary comes from github releases — an
+# attacker would have to compromise both paths to swap the binary undetected.
+# Update this whenever RELEASE_TAG / the binary changes.
+BIN_SHA256_arm64="6248568b3f62a9cad5d31edc0a2393f5a3b4b7cb9eb6d7056161a528ba18187f"
 NODE_VERSION="22"
 LAUNCH_LABEL="com.cc-whatsapp.dashboard"
 LAUNCH_PLIST="${HOME}/Library/LaunchAgents/${LAUNCH_LABEL}.plist"
@@ -126,6 +131,29 @@ mkdir -p "${BIN_DIR}"
 c "Downloading cc-whatsapp daemon (${RELEASE_TAG} / ${ASSET})..."
 curl -fsSL "https://github.com/willau95/cc-whatsapp/releases/download/${RELEASE_TAG}/${ASSET}" -o "${BIN_PATH}" \
   || err "Binary download failed."
+
+# Verify the binary against the pinned SHA256 before making it executable, so a
+# corrupted download or a swapped release artifact can't run on your machine.
+case "$ARCH" in
+  arm64) EXPECTED_SHA="${BIN_SHA256_arm64}" ;;
+  *)     EXPECTED_SHA="" ;;
+esac
+if [ -n "${EXPECTED_SHA}" ]; then
+  if command -v shasum >/dev/null 2>&1; then
+    ACTUAL_SHA="$(shasum -a 256 "${BIN_PATH}" | awk '{print $1}')"
+  else
+    ACTUAL_SHA="$(sha256sum "${BIN_PATH}" | awk '{print $1}')"
+  fi
+  if [ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]; then
+    rm -f "${BIN_PATH}"
+    err "Binary checksum mismatch — refusing to run.
+       expected: ${EXPECTED_SHA}
+       got:      ${ACTUAL_SHA}
+     This means the downloaded binary does not match the pinned release. Do NOT
+     run it. Report this at https://github.com/willau95/cc-whatsapp/issues"
+  fi
+  ok "Binary checksum verified (sha256)"
+fi
 chmod +x "${BIN_PATH}"
 ok "Binary: ${BIN_PATH}"
 

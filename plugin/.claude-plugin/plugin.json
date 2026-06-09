@@ -1,6 +1,6 @@
 {
   "name": "cc-whatsapp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Bind a WhatsApp number to a Claude Code project. Pair / persona / allowlist / batching state machine / multi-segment humanlike replies.",
   "author": "willau95",
   "license": "MIT",
