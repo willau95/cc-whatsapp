@@ -779,6 +779,7 @@ function recentUnboundJids(projectId: string, limit = 50): Array<{ jid: string; 
   // after the drop) or that the user explicitly dismissed.
   const out: any[] = []
   for (const [jid, info] of candidates) {
+    if (!isValidJid(jid)) continue   // malformed JIDs were dropped anyway — never surface as bindable
     if (dismissed.has(jid)) continue
     if (allowFrom.has(jid) && info.reason !== 'group seen — optionally bind to a specific project') continue
     out.push({ jid, ...info })
